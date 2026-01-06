@@ -2,8 +2,8 @@
 client_id: "{{ omit }}"
 secret: "{{ omit }}"
 # tenant: "{{ omit }}" 
-tenant: "1b7a433e-a69a-4d6c-91cc-7d2e7c8b5ac6"
-subscription_id: "ff328a26-2edd-475f-bfcc-a94db85bb631"
+tenant: ""
+subscription_id: ""
 
 # create-rg
 new_rg: ansible-test-rg-fresh

@@ -1,0 +1,53 @@
+---
+# tasks file for create-vnet
+- name: Create new vnet if it does not exist
+  azure_rm_virtualnetwork:
+    resource_group: "{{ rg_id }}"
+    name: "{{ new_vpc_name }}"
+    address_prefixes: "{{ new_vpc_cidr }}"
+    client_id: "{{ client_id }}"
+    secret: "{{ secret }}"
+    subscription_id: "{{ subscription_id }}"
+    tenant: "{{ tenant }}"
+  register: created_vnet
+  when: existing_network_id == ""
+
+- name: Debug created vnet
+  debug:
+    msg: "{{ created_vnet }}"
+  when: existing_network_id == ""
+
+- name: Set vnet variable
+  set_fact:
+    vnet: >-
+      {% if existing_network_id is defined and existing_network_id %}{{existing_network_id}}{% else %}{{new_vpc_name}}{% endif %}
+
+- name: Print vnet attributes
+  debug:
+    msg:
+    - "name: {{ created_vnet.state.name }}"
+    - "region: {{ created_vnet.state.location }}"
+    - "ciderBlockIP: {{ created_vnet.state.address_prefixes[0] }}"
+    - "resourceGroup: {{ rg_id }}"
+    - "cgID: {{ new_vpc_cgid }}"
+  when: existing_network_id == ""
+
+- name: Run a Cypher query to store vnet details
+  command: >
+    cypher-shell
+    {{ cypher_auth }}
+    "MERGE (n:VPC {cgID: '{{ new_vpc_cgid }}'})
+    ON MATCH SET
+      n.cloudID = '{{ created_vnet.state.name }}',
+      n.name = '{{ created_vnet.state.name }}', 
+      n.region = '{{ created_vnet.state.location }}',
+      n.cidrBlockRange = '{{ created_vnet.state.address_prefixes[0] }}',
+      n.resourceGroup = '{{ rg_id }}'
+    RETURN n"
+  when: existing_network_id == ""
+  register: vnet_query_output
+
+# - name: Debug Cypher query output for vnet
+#   debug:
+#     msg: "{{ vnet_query_output.stdout }}"
+#   when: existing_network_id == ""

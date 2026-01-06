@@ -1,0 +1,61 @@
+- name: Create Azure SQL Database
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  roles:
+    - role: create-rg
+      vars:
+        new_rg: "{{ new_rg }}"
+        existing_rg: "{{ existing_rg }}"
+        region: "{{ region }}"
+        rg_cgid: "{{ rg_cgid }}"
+        client_id: "{{ client_id }}"
+        secret: "{{ secret }}"
+        subscription_id: "{{ subscription_id }}"
+        tenant: "{{ tenant }}"
+        cypher_auth: "-u {{ neo4j_user }} -p {{ neo4j_password }} -a {{ neo4j_host }}"
+
+
+    - role: create-vpc
+      vars:
+        rg_id: "{{ rg if rg is defined else new_rg }}"
+        existing_network_id: "{{ existing_network_id }}"
+        new_vpc_name: "{{ vnet_name }}"
+        new_vpc_cidr: "{{ new_vpc_cidr }}"
+        new_vpc_cgid: "vpc-001"
+        client_id: "{{ client_id }}"
+        secret: "{{ secret }}"
+        subscription_id: "{{ subscription_id }}"
+        tenant: "{{ tenant }}"
+        cypher_auth: "-u {{ neo4j_user }} -p {{ neo4j_password }} -a {{ neo4j_host }}"
+
+    - role: create-managed-sql-subnet
+      vars:
+        rg_id: "{{ rg if rg is defined else new_rg }}"
+        vpc_id: "{{ vnet_name }}"
+        existing_subnet_id_var: ""
+        new_subnet_name_var: "{{ subnet_name }}"
+        new_subnet_cidr_var: "{{ new_subnet_cidr_var }}"
+        new_subnet_cgid: "subnet-001"
+        security_group: "{{ subnet_name }}-nsg"
+        nsg_rules: "{{ sql_mi_nsg_rules }}"
+        route_table: "{{ subnet_name }}-rt"
+        location: "{{ region }}"
+        delegations: "Microsoft.Sql/managedInstances"
+        client_id: "{{ client_id }}"
+        secret: "{{ secret }}"
+        subscription_id: "{{ subscription_id }}"
+        tenant: "{{ tenant }}"
+        cypher_auth: "-u {{ neo4j_user }} -p {{ neo4j_password }} -a {{ neo4j_host }}"
+
+    - role: create-azure-sql
+
+      vars:
+        resource_group: "{{ new_rg if (existing_rg is not defined or existing_rg == '') else existing_rg }}"
+        location: "{{ region }}"
+        sql_server_name: "{{ sql_server_name }}"
+        database_name: "{{ database_name }}"
+        sql_admin_user: "{{ sql_admin_user }}"
+        sql_admin_password: "{{ sql_admin_password }}"
+        sku_name: "{{ sku_name }}"
+        storage_size: "{{ storage_size }}"

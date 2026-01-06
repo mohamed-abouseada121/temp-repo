@@ -1,0 +1,67 @@
+# General / Auth
+client_id: "{{ omit }}"
+secret: "{{ omit }}"
+# tenant: "{{ omit }}" 
+tenant: "1b7a433e-a69a-4d6c-91cc-7d2e7c8b5ac6"
+subscription_id: "ff328a26-2edd-475f-bfcc-a94db85bb631"
+
+# create-rg
+new_rg: ansible-test-rg-fresh
+existing_rg: ""
+region: eastus2
+rg_cgid: "rg-001"
+neo4j_user: "neo4j"
+neo4j_password: "OPlR0LHas1gXXlJm2VGB2pPnTUdr0BH_mI1OdBo73Fc"
+neo4j_host: "neo4j+s://0f85b4b4.databases.neo4j.io"
+cypher_auth: "-u {{ neo4j_user }} -p {{ neo4j_password }} -a {{ neo4j_host }}"
+
+# create-vpc
+existing_network_id: ""
+new_vpc_name: ansible-vnet-fresh
+new_vpc_cidr: 10.0.0.0/16
+new_vpc_cgid: "vpc-001"
+vnet_name: "ansible-vnet-fresh"  
+
+# create-managed-sql-subnet
+existing_subnet_id_var: ""
+new_subnet_name_var: ManagedInstanceSubnet
+new_subnet_cidr_var: 10.0.2.0/24
+new_subnet_cgid: "subnet-001"
+subnet_name: "ManagedInstanceSubnet"
+
+# Azure SQL MI Specifics
+sql_server_name: "ansible-sql-mi-513"
+database_name: "my-azure-sql-db"
+sql_admin_user: "sqladmin"
+sql_admin_password: "ChangeMe123!"
+location: "eastus2"
+sku_name: "Gen5" 
+sku_tier: "GeneralPurpose"
+vcores: 4
+storage_size: 64
+sql_cgid: "sql-mi-001"
+sql_db_cgid: "sql-db-001"
+
+# NSG Rules for SQL MI
+sql_mi_nsg_rules:
+  # ---------- Inbound ----------
+  - name: AllowVnetInbound
+    protocol: "*"
+    source_address_prefix: VirtualNetwork
+    destination_port_range: "*"
+    access: Allow
+    priority: 1100
+    direction: Inbound
+
+
+  # ---------- Outbound ----------
+  - name: AllowVnetOutbound
+    protocol: "*"
+    destination_address_prefix: VirtualNetwork
+    destination_port_range: "*"
+    access: Allow
+    priority: 1100
+    direction: Outbound
+
+
+service_name: Microsoft.Sql/managedInstances

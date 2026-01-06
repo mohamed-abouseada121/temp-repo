@@ -1,0 +1,71 @@
+---
+- name: Generate new rules list
+  set_fact:
+    rules_generated: []
+
+- name: Create new securitygroup if it does not exist
+  azure_rm_securitygroup:
+    name: "{{ security_group }}"
+    resource_group: "{{ rg_id }}"
+    rules: "{{ nsg_rules }}"
+    client_id: "{{ client_id }}"
+    secret: "{{ secret }}"
+    subscription_id: "{{ subscription_id }}"
+    tenant: "{{ tenant }}"
+  register: created_securitygroup
+
+- name: Run a Cypher query to store security_group details
+  command: >
+    cypher-shell
+    {{ cypher_auth }}
+    "MERGE (sg:SecurityGroup {cloudID: '{{ security_group }}'})
+    ON MATCH SET
+      sg.name = '{{ security_group }}', 
+      sg.resourceGroup = '{{ rg_id }}',
+      sg.ports = '{{ nsg_rules | to_json }}'
+    RETURN sg"
+  when: created_securitygroup.changed
+
+- name: Create Route Table
+  azure_rm_routetable:
+    resource_group: "{{ rg_id }}"
+    name: "{{ route_table }}"
+    location: "{{ location | default(omit) }}"
+    client_id: "{{ client_id }}"
+    secret: "{{ secret }}"
+    subscription_id: "{{ subscription_id }}"
+    tenant: "{{ tenant }}"
+  register: created_route_table
+
+- name: Create new SQL Managed Instance subnet
+  azure_rm_subnet:
+    resource_group: "{{ rg_id }}"
+    name: "{{ new_subnet_name_var }}"
+    address_prefixes: "{{ new_subnet_cidr_var }}"
+    virtual_network: "{{ vpc_id }}"
+    security_group: "{{ security_group }}"
+    route_table: "{{ route_table }}"
+    delegations:
+      - name: "{{ delegations | replace('/', '-') }}"
+        serviceName: "{{ delegations }}"
+    private_link_service_network_policies: "{{ private_link_service_network_policies | default(omit) }}"
+    client_id: "{{ client_id }}"
+    secret: "{{ secret }}"
+    subscription_id: "{{ subscription_id }}"
+    tenant: "{{ tenant }}"
+  register: created_subnet
+  when: existing_subnet_id_var == ""
+
+- name: Run a Cypher query to store Subnet details
+  command: >
+    cypher-shell
+    {{ cypher_auth }}
+    "MERGE (s:Subnet {cgID: '{{ new_subnet_cgid }}'})
+    ON MATCH SET
+      s.cloudID = '{{ new_subnet_name_var }}',
+      s.name = '{{ new_subnet_name_var }}', 
+      s.resourceGroup = '{{ rg_id }}',
+      s.vpcID = '{{ vpc_id }}',
+      s.cidrBlockRange = '{{ new_subnet_cidr_var }}'
+    RETURN s"
+  when: existing_subnet_id_var == "" and created_subnet.changed

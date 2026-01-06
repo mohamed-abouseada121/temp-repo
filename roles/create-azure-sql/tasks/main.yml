@@ -1,0 +1,87 @@
+---
+- name: Check if Azure SQL Managed Instance exists
+  command: >
+    az sql mi show
+    --resource-group {{ resource_group }}
+    --name {{ sql_server_name }}
+  register: mi_check
+  ignore_errors: yes
+
+- name: Start Azure SQL Managed Instance Creation
+  command: >
+    az sql mi create
+    --resource-group {{ resource_group }}
+    --name {{ sql_server_name }}
+    --location {{ location }}
+    --admin-user {{ sql_admin_user }}
+    --admin-password {{ sql_admin_password }}
+    --subnet /subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.Network/virtualNetworks/{{ vnet_name }}/subnets/{{ subnet_name }}
+    --edition {{ sku_tier }}
+    --family {{ sku_name }}
+    --storage {{ storage_size }}GB
+    --capacity {{ vcores }}
+    --license-type BasePrice
+    --yes
+    --no-wait
+  when: mi_check.rc != 0
+
+- name: Wait for Managed Instance to be ready (Loop Check)
+  command: >
+    az sql mi show 
+    --resource-group {{ resource_group }} 
+    --name {{ sql_server_name }} 
+    --query provisioningState 
+    --output tsv
+  register: mi_status
+  until: mi_status.stdout == "Succeeded"
+  retries: 240       
+  delay: 60          
+  ignore_errors: yes 
+  when: mi_check.rc != 0 
+
+- name: Check if Azure SQL Managed Instance Database exists
+  command: >
+    az sql midb show
+    --resource-group {{ resource_group }}
+    --managed-instance {{ sql_server_name }}
+    --name {{ database_name }}
+  register: midb_check
+  ignore_errors: yes
+
+- name: Create Azure SQL Managed Instance Database
+  command: >
+    az sql midb create
+    --resource-group {{ resource_group }}
+    --managed-instance {{ sql_server_name }}
+    --name {{ database_name }}
+  when: midb_check.rc != 0
+
+
+- name: Run Cypher query to store SQL Managed Instance details
+  command: >
+    cypher-shell
+    {{ cypher_auth }}
+    "MERGE (mi:SQLManagedInstance {cgID: '{{ sql_cgid }}'})
+    ON MATCH SET
+      mi.cloudID = '{{ sql_server_name }}',
+      mi.name = '{{ sql_server_name }}',
+      mi.resourceGroup = '{{ resource_group }}',
+      mi.vpcID = '{{ vnet_name }}',
+      mi.subnetID = '{{ subnet_name }}',
+      mi.adminUser = '{{ sql_admin_user }}',
+      mi.location = '{{ location }}'
+    RETURN mi"
+  when: mi_check.rc != 0 and mi_status.stdout == "Succeeded"
+
+- name: Run Cypher query to store SQL Database details
+  command: >
+    cypher-shell
+    {{ cypher_auth }}
+    "MERGE (db:SQLDatabase {cgID: '{{ sql_db_cgid }}'})
+    ON MATCH SET
+      db.cloudID = '{{ database_name }}',
+      db.name = '{{ database_name }}',
+      db.managedInstance = '{{ sql_server_name }}',
+      db.resourceGroup = '{{ resource_group }}'
+    RETURN db"
+  when: midb_check.rc != 0

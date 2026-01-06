@@ -1,0 +1,47 @@
+---
+# tasks file for create-rg-azure
+- name: Determine resourcegroup to use
+  set_fact:
+    resourcegroup_to_use: >-
+      {% if existing_rg is defined and existing_rg %}{{existing_rg}}{% else %}{{new_rg}}{% endif %}
+
+- name: Create new resource group if it does not exist
+  azure_rm_resourcegroup:
+    name: "{{ new_rg }}"
+    location: "{{ region }}"
+    client_id: "{{ client_id }}"
+    secret: "{{ secret }}"
+    subscription_id: "{{ subscription_id }}"
+    tenant: "{{ tenant }}"
+  register: created_rg
+  when: existing_rg is not defined or existing_rg == ""
+
+- name: Set resource group variable
+  set_fact:
+    rg: >-
+      {% if existing_rg is defined and existing_rg %}{{existing_rg}}{% else %}{{new_rg}}{% endif %}
+
+- name: print resource group attributes
+  debug:
+    msg:
+      - "name: {{ rg }}"
+      - "region: {{ region }}"
+      - "cgID: {{ rg_cgid }}"
+
+- name: Run a Cypher query to store Resource Group details
+  command: >
+    cypher-shell
+    {{ cypher_auth }}
+    "MERGE (rg:ResourceGroup {cgID: '{{ rg_cgid }}'})
+    ON MATCH SET
+      rg.name = '{{ created_rg.state.name }}', 
+      rg.cloudID = '{{ created_rg.state.name }}', 
+      rg.region = '{{ created_rg.state.location }}'
+    RETURN rg"
+  register: rg_query_output
+  when: existing_rg is not defined or existing_rg == ""
+
+# - name: Debug Cypher query output for resource group
+#   debug:
+#     msg: "{{ rg_query_output.stdout }}"
+#   when: existing_rg is not defined or existing_rg == ""

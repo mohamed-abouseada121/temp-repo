@@ -360,3 +360,137 @@ On reconnect → Read from Redis → Resume exactly where left off
 - Dashboard للإحصائيات وتقارير التوظيف
 - Ranking System للممتحنين
 - Video Storage Retention Policy (نقل لـ Cold Storage بعد 90 يوم)
+
+
+
+
+
+بدايه في الاول
+
+
+
+
+
+
+______________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________
+
+---
+
+### MVP Features (Priority Order)
+
+#### Sprint 1 (Week 1-2): الأساسيات
+- [ ] User Registration + Login (JWT)
+- [ ] National ID validation (Hash + Encrypted)
+- [ ] Admin panel بسيط لإدارة الأسئلة
+- [ ] Question Bank CRUD
+
+#### Sprint 2 (Week 3-4): الاختبار الأول (MCQ/Written)
+- [ ] Full Screen Exam Mode
+- [ ] Server-side Timer (WebSocket)
+- [ ] Violation Detection (focus lost, tab change)
+- [ ] Auto-save to Redis
+- [ ] Random question selection + shuffling
+- [ ] Auto-grading for MCQ
+
+#### Sprint 3 (Week 5-6): الاختبار الثاني (Linux Lab)
+- [ ] Docker container creation per candidate
+- [ ] Web-based terminal (xterm.js + WebSocket)
+- [ ] Timer + auto-destroy
+- [ ] Evaluation script runner
+- [ ] Score calculation + report
+
+#### Sprint 4 (Week 7-8): الاختبار الثالث (Interview)
+- [ ] Video recording (MediaRecorder API)
+- [ ] Pre-signed URL upload to S3/R2
+- [ ] Link video to user session
+- [ ] HR review interface
+
+#### Sprint 5 (Week 9-10): Polish
+- [ ] Results dashboard
+- [ ] Email notifications
+- [ ] Basic analytics
+- [ ] Security hardening
+- [ ] Load testing (100 concurrent)
+
+---
+
+### MVP Security (مش هتتنازل عنها)
+
+حتى في الـ MVP، في حاجات أمنية لازم تكون موجودة من يوم 1:
+
+```
+✅ HTTPS (Let's Encrypt via Nginx)
+✅ JWT with refresh tokens
+✅ National ID: Hash + AES-256 encryption
+✅ Rate limiting (Nginx: 10 req/s per IP)
+✅ Docker containers: --network=none (no internet)
+✅ Docker containers: --memory=512m --cpus=1 (resource limits)
+✅ gVisor runtime (runsc) for lab containers
+✅ Input validation (Pydantic models)
+✅ SQL injection protection (SQLAlchemy ORM)
+✅ CORS properly configured
+```
+
+---
+
+### متى تنتقل من MVP للـ Full Architecture؟
+
+| Signal | Action |
+|--------|--------|
+| > 500 users/day | أضف Load Balancer + Second Server |
+| > 50 concurrent labs | انقل Labs لسيرفر مستقل |
+| > 2000 users/day | انتقل لـ Microservices |
+| > 100 concurrent labs | انتقل لـ Kubernetes |
+| Revenue > $5K/mo | أضف Firecracker + Full Monitoring |
+| Enterprise clients | أضف WAF + SOC2 Compliance |
+
+---
+
+### Folder Structure (MVP)
+
+```
+project/
+├── docker-compose.yml
+├── nginx.conf
+├── backend/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── app/
+│   │   ├── main.py              # FastAPI app
+│   │   ├── config.py            # Settings
+│   │   ├── models/              # SQLAlchemy models
+│   │   │   ├── user.py
+│   │   │   ├── exam.py
+│   │   │   ├── question.py
+│   │   │   └── session.py
+│   │   ├── api/                 # Route handlers
+│   │   │   ├── auth.py
+│   │   │   ├── exams.py
+│   │   │   ├── labs.py
+│   │   │   └── interviews.py
+│   │   ├── services/            # Business logic
+│   │   │   ├── exam_service.py
+│   │   │   ├── lab_service.py
+│   │   │   └── evaluation.py
+│   │   ├── worker.py            # Celery tasks
+│   │   └── websocket.py         # WS handlers
+│   └── evaluation_scripts/
+│       └── linux_basics.sh
+├── frontend/
+│   ├── package.json
+│   ├── src/
+│   │   ├── app/                 # Next.js app router
+│   │   ├── components/
+│   │   │   ├── ExamScreen.tsx
+│   │   │   ├── Terminal.tsx
+│   │   │   └── VideoRecorder.tsx
+│   │   └── lib/
+│   │       ├── api.ts
+│   │       └── websocket.ts
+│   └── public/
+└── lab-images/
+    └── linux-basics/
+        └── Dockerfile           # Base image for lab
+```
+
+---

@@ -374,12 +374,76 @@ On reconnect → Read from Redis → Resume exactly where left off
 
 ______________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________
 
-# Technical Assessment Platform - MVP
+## Technical Assessment Platform - MVP
 
 ## Overview
 منصة تقييم تقني لاختبار المتقدمين للوظائف عبر 3 مراحل: MCQ/Written، Linux Lab، One-Way Interview.
 
 **Target:** 100 user/day | Single VPS | ~$25-50/mo
+
+---
+
+## Registration & Eligibility Flow
+
+### القواعد:
+1. المستخدم **لازم يسجل أولاً** ويدخل الرقم القومي
+2. الرقم القومي **لا يتكرر** — شخص واحد = حساب واحد
+3. لو فشل في امتحان → **ممنوع يدخله تاني إلا بعد 3 شهور**
+4. الـ Cooldown بالامتحان مش بالمنصة (لو فشل في MCQ يقدر يدخل Lab عادي)
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant API as Backend
+    participant DB as PostgreSQL
+
+    U->>API: Register (name, email, national_id, phone)
+    API->>API: SHA256(national_id) → check unique
+    alt National ID already exists
+        API-->>U: ❌ "هذا الرقم مسجل مسبقاً"
+    else New user
+        API->>DB: Store user (hash + encrypted national_id)
+        API-->>U: ✅ Account created + JWT
+    end
+
+    Note over U,API: ───── Later: User wants to take exam ─────
+
+    U->>API: Request to start Exam X
+    API->>DB: Check ExamSessions WHERE user_id AND exam_id AND status='Failed'
+    API->>API: Last failed attempt date + 90 days > today?
+    alt Cooldown active
+        API-->>U: ❌ "ممنوع إعادة الامتحان قبل {date}"
+    else Eligible
+        API->>DB: Create new ExamSession
+        API-->>U: ✅ Start exam
+    end
+```
+
+### الـ Cooldown Logic (Backend):
+
+```python
+from datetime import datetime, timedelta
+
+COOLDOWN_DAYS = 90
+
+async def check_eligibility(user_id: str, exam_id: str, db: Session) -> dict:
+    last_failed = db.query(ExamSession).filter(
+        ExamSession.user_id == user_id,
+        ExamSession.exam_id == exam_id,
+        ExamSession.status == "Failed"
+    ).order_by(ExamSession.finished_at.desc()).first()
+
+    if last_failed:
+        eligible_date = last_failed.finished_at + timedelta(days=COOLDOWN_DAYS)
+        if datetime.utcnow() < eligible_date:
+            return {
+                "eligible": False,
+                "retry_after": eligible_date.isoformat(),
+                "message": f"ممنوع إعادة الامتحان قبل {eligible_date.strftime('%Y-%m-%d')}"
+            }
+
+    return {"eligible": True}
+```
 
 ---
 
@@ -432,6 +496,7 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     C->>API: Start Exam (JWT)
+    API->>DB: Check eligibility (cooldown)
     API->>DB: Create ExamSession
     API->>DB: Select random questions
     API->>R: Store state (timer, answers, violations)
@@ -452,6 +517,11 @@ sequenceDiagram
 
     Note over C: Exam finished / Timer expired
     API->>DB: Calculate score + save
+    alt Score >= passing grade
+        API->>DB: status = "Passed"
+    else Score < passing grade
+        API->>DB: status = "Failed" (cooldown starts)
+    end
     API-->>C: Results
 ```
 
@@ -477,6 +547,7 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     C->>API: Start Lab
+    API->>DB: Check eligibility (cooldown)
     API->>W: Task: create_lab_container
     API-->>C: "Preparing..." (202)
     W->>D: docker run --runtime=runsc --network=none --memory=512m
@@ -487,6 +558,11 @@ sequenceDiagram
     W->>D: docker stop + docker rm
     W->>W: Run evaluation script on snapshot
     W->>DB: Save score + report_json
+    alt Score >= passing grade
+        W->>DB: status = "Passed"
+    else Score < passing grade
+        W->>DB: status = "Failed" (cooldown starts)
+    end
     W-->>C: WebSocket: Results ready
 ```
 
@@ -501,8 +577,6 @@ Docker flags:
   --read-only              # Root filesystem read-only
   --tmpfs /tmp:size=100m   # Writable tmp only
 ```
-
-**Evaluation يشتغل على Snapshot مش على الـ Container مباشرة** — عشان الممتحن ميقدرش يضلل الـ Script.
 
 ---
 
@@ -523,11 +597,7 @@ sequenceDiagram
     API->>API: Link video to InterviewSession
 ```
 
-**Features:**
-- أسئلة عشوائية أو ثابتة تظهر واحد واحد
-- تسجيل فيديو عبر المتصفح (MediaRecorder API)
-- رفع مباشر للـ R2 بدون مرور على الـ Backend
-- HR Review interface لمشاهدة وتقييم الفيديوهات
+**Note:** الـ Interview مفيهوش Pass/Fail تلقائي — HR هو اللي بيقيّم يدوي.
 
 ---
 
@@ -540,8 +610,10 @@ erDiagram
         string full_name
         string national_id_hash UK
         bytea national_id_encrypted
-        string phone
-        string email
+        string phone UK
+        string email UK
+        string password_hash
+        boolean is_admin
         timestamp created_at
     }
 
@@ -550,6 +622,8 @@ erDiagram
         string title
         enum type "MCQ | Written | Lab | Interview"
         int duration_minutes
+        int passing_score
+        int cooldown_days "default 90"
         boolean active
         timestamp created_at
     }
@@ -573,7 +647,7 @@ erDiagram
         timestamp finished_at
         int violations_count
         int score
-        enum status "In_Progress | Completed | Cancelled | Violated"
+        enum status "In_Progress | Passed | Failed | Cancelled | Violated"
     }
 
     ExamQuestionMapping {
@@ -605,20 +679,23 @@ erDiagram
     LabSessions {
         uuid id PK
         uuid user_id FK
+        uuid exam_id FK
         string container_id
         timestamp started_at
         timestamp ended_at
         int score
         jsonb report_json
-        enum status "Running | Evaluating | Completed | Timeout"
+        enum status "Running | Evaluating | Passed | Failed | Timeout"
     }
 
     InterviewSessions {
         uuid id PK
         uuid user_id FK
+        uuid exam_id FK
         string video_path
         int duration_seconds
         int hr_score
+        enum status "Recorded | Under_Review | Reviewed"
         timestamp recorded_at
     }
 
@@ -635,6 +712,7 @@ erDiagram
     Users ||--o{ InterviewSessions : records
     Exams ||--o{ QuestionBank : contains
     Exams ||--o{ ExamSessions : has
+    Exams ||--o{ LabSessions : has
     ExamSessions ||--o{ ExamQuestionMapping : includes
     ExamSessions ||--o{ Answers : has
     ExamSessions ||--o{ ViolationEvents : logs
@@ -664,9 +742,7 @@ erDiagram
 
 ---
 
-## Infrastructure
-
-### docker-compose.yml
+## Infrastructure (docker-compose.yml)
 
 ```yaml
 version: "3.8"
@@ -679,7 +755,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://user:pass@db:5432/assessments
       - REDIS_URL=redis://redis:6379
-      - S3_ENDPOINT=https://xxx.r2.cloudflarestorage.com
+      - S3_ENDPOINT=${S3_ENDPOINT}
       - S3_ACCESS_KEY=${S3_ACCESS_KEY}
       - S3_SECRET_KEY=${S3_SECRET_KEY}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
@@ -747,58 +823,24 @@ volumes:
   redisdata:
 ```
 
-### nginx.conf (Key Parts)
-
-```nginx
-upstream api {
-    server api:8000;
-}
-
-server {
-    listen 443 ssl;
-    server_name yourdomain.com;
-
-    ssl_certificate     /etc/nginx/certs/fullchain.pem;
-    ssl_certificate_key /etc/nginx/certs/privkey.pem;
-
-    # Rate limiting
-    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
-    limit_req zone=api burst=20 nodelay;
-
-    # API
-    location /api/ {
-        proxy_pass http://api;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # WebSocket
-    location /ws/ {
-        proxy_pass http://api;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-```
-
 ---
 
 ## Security (Day 1)
 
 ```
 ✅ HTTPS (Let's Encrypt via Certbot)
-✅ JWT with refresh tokens (short-lived access tokens)
-✅ National ID: SHA256 Hash (unique) + AES-256 encrypted (readable)
+✅ JWT with refresh tokens
+✅ National ID: SHA256 Hash (unique constraint) + AES-256 encrypted
 ✅ Rate limiting: 10 req/s per IP (Nginx)
 ✅ Lab containers: --runtime=runsc (gVisor)
-✅ Lab containers: --network=none (no internet access)
+✅ Lab containers: --network=none
 ✅ Lab containers: --memory=512m --cpus=1 --pids-limit=100
-✅ Input validation: Pydantic models on every endpoint
-✅ SQL injection: SQLAlchemy ORM (no raw queries)
+✅ Input validation: Pydantic models
+✅ SQL injection: SQLAlchemy ORM
 ✅ CORS: whitelist frontend domain only
-✅ Secrets: environment variables (never in code)
-✅ Evaluation: runs on filesystem snapshot (not live container)
+✅ Secrets: .env file (never committed)
+✅ Evaluation: runs on snapshot not live container
+✅ Cooldown enforcement: server-side (can't bypass from frontend)
 ```
 
 ---
@@ -807,10 +849,25 @@ server {
 
 ### National ID Protection
 ```
-┌─────────────────────────────────────────────┐
-│  national_id_hash   = SHA256(id)            │  → Unique Constraint
-│  national_id_encrypted = AES256(id)         │  → HR can decrypt
-└─────────────────────────────────────────────┘
+Registration:
+  national_id → SHA256(national_id) → store as national_id_hash (UNIQUE)
+  national_id → AES256(national_id) → store as national_id_encrypted
+  
+Duplicate check: compare hash (fast, O(1) with index)
+HR needs original: decrypt with ENCRYPTION_KEY
+```
+
+### Exam Cooldown (3 Months)
+```
+ExamSessions table:
+  status = "Failed" + finished_at = "2026-03-01"
+  
+User tries again on 2026-04-15:
+  eligible_date = 2026-03-01 + 90 days = 2026-05-30
+  today (2026-04-15) < eligible_date → ❌ BLOCKED
+
+User tries again on 2026-06-05:
+  today (2026-06-05) > eligible_date → ✅ ALLOWED
 ```
 
 ### State Management (Disconnect Resilience)
@@ -838,7 +895,7 @@ Internet drops → Reconnect → Read Redis → Resume same point
 project/
 ├── docker-compose.yml
 ├── .env                         # Secrets (not in git)
-├── .env.example                 # Template
+├── .env.example
 ├── nginx/
 │   ├── nginx.conf
 │   └── certs/
@@ -861,231 +918,129 @@ project/
 │   │   │   ├── exam.py
 │   │   │   └── lab.py
 │   │   ├── api/                 # Route handlers
-│   │   │   ├── auth.py
-│   │   │   ├── exams.py
+│   │   │   ├── auth.py          # Register + Login + National ID check
+│   │   │   ├── exams.py         # Start exam + eligibility check
 │   │   │   ├── labs.py
 │   │   │   ├── interviews.py
 │   │   │   └── admin.py
-│   │   ├── services/            # Business logic
+│   │   ├── services/
 │   │   │   ├── auth_service.py
+│   │   │   ├── eligibility.py   # Cooldown logic
 │   │   │   ├── exam_service.py
 │   │   │   ├── lab_service.py
 │   │   │   └── evaluation.py
 │   │   ├── worker.py            # Celery tasks
-│   │   └── websocket.py         # WS handlers (timer, terminal)
+│   │   └── websocket.py         # Timer + Terminal
 │   ├── evaluation_scripts/
 │   │   ├── linux_basics.sh
 │   │   └── nginx_setup.sh
 │   └── tests/
-│       ├── test_auth.py
-│       ├── test_exam.py
-│       └── test_lab.py
 ├── frontend/
 │   ├── package.json
-│   ├── next.config.js
 │   ├── src/
-│   │   ├── app/                 # Next.js App Router
-│   │   │   ├── page.tsx         # Landing
-│   │   │   ├── login/
+│   │   ├── app/
+│   │   │   ├── page.tsx
 │   │   │   ├── register/
+│   │   │   ├── login/
 │   │   │   ├── exam/
 │   │   │   ├── lab/
 │   │   │   ├── interview/
 │   │   │   └── admin/
 │   │   ├── components/
-│   │   │   ├── ExamScreen.tsx   # Fullscreen exam UI
-│   │   │   ├── Terminal.tsx     # xterm.js wrapper
+│   │   │   ├── ExamScreen.tsx
+│   │   │   ├── Terminal.tsx
 │   │   │   ├── VideoRecorder.tsx
-│   │   │   └── Timer.tsx
+│   │   │   └── CooldownNotice.tsx
 │   │   └── lib/
-│   │       ├── api.ts           # Axios/fetch wrapper
-│   │       ├── websocket.ts     # WS connection manager
-│   │       └── auth.ts          # JWT handling
+│   │       ├── api.ts
+│   │       ├── websocket.ts
+│   │       └── auth.ts
 │   └── public/
 └── lab-images/
-    ├── linux-basics/
-    │   └── Dockerfile
-    └── nginx-setup/
-        └── Dockerfile
+    ├── linux-basics/Dockerfile
+    └── nginx-setup/Dockerfile
 ```
 
 ---
 
 ## Sprint Plan
 
-### Sprint 1 (Week 1-2): Auth + Admin
-- [ ] User Registration + Login (JWT + Refresh Token)
-- [ ] National ID validation (Hash + AES-256)
+### Sprint 1 (Week 1-2): Registration + Auth
+- [ ] User Registration (name, email, phone, national_id)
+- [ ] National ID: Hash + AES-256 + Unique check
+- [ ] Login (JWT + Refresh Token)
+- [ ] Eligibility service (cooldown logic)
 - [ ] Admin panel لإدارة الأسئلة والامتحانات
 - [ ] Question Bank CRUD
-- [ ] Docker Compose setup + deployment script
+- [ ] Docker Compose setup
 
 ### Sprint 2 (Week 3-4): MCQ/Written Exam
+- [ ] Eligibility check before starting
 - [ ] Full Screen Exam Mode
 - [ ] Server-side Timer (WebSocket)
-- [ ] Violation Detection + Violation System
-- [ ] Auto-save to Redis (every 10s)
+- [ ] Violation Detection + System
+- [ ] Auto-save to Redis
 - [ ] Random question selection + shuffling
-- [ ] Auto-grading for MCQ
-- [ ] Reconnection resilience
+- [ ] Auto-grading → Pass/Fail + Cooldown trigger
 
 ### Sprint 3 (Week 5-6): Linux Lab
+- [ ] Eligibility check before starting
 - [ ] Docker + gVisor container creation
 - [ ] Web terminal (xterm.js + WebSocket)
 - [ ] Timer + auto-destroy (Celery Beat)
-- [ ] Filesystem snapshot + evaluation script
-- [ ] Score calculation + JSON report
-- [ ] Build 2-3 lab images
+- [ ] Filesystem snapshot + evaluation
+- [ ] Score → Pass/Fail + Cooldown trigger
 
 ### Sprint 4 (Week 7-8): One-Way Interview
 - [ ] Video recording UI (MediaRecorder API)
 - [ ] Pre-signed URL upload to R2
 - [ ] Link video to user session
 - [ ] HR review interface (watch + score)
-- [ ] Question display (one at a time)
 
 ### Sprint 5 (Week 9-10): Polish + Launch
-- [ ] Results dashboard (candidate + admin views)
-- [ ] Email notifications (exam invite, results)
-- [ ] Basic analytics (pass rate, avg score)
-- [ ] Security audit + hardening
-- [ ] Load testing (simulate 100 users)
-- [ ] Deploy to production VPS
+- [ ] Results dashboard + cooldown status display
+- [ ] Email notifications (invite, results, cooldown expiry)
+- [ ] Basic analytics
+- [ ] Security audit
+- [ ] Load testing (100 users)
+- [ ] Deploy to production
+
+---
+
+## API Endpoints (Key)
+
+```
+POST   /api/auth/register          # Register + National ID check
+POST   /api/auth/login             # Login → JWT
+POST   /api/auth/refresh           # Refresh token
+
+GET    /api/exams                  # List available exams
+GET    /api/exams/{id}/eligibility # Check if user can take exam
+POST   /api/exams/{id}/start       # Start exam (checks cooldown)
+POST   /api/exams/{id}/answer      # Submit answer
+POST   /api/exams/{id}/finish      # End exam
+
+POST   /api/labs/{id}/start        # Start lab (checks cooldown)
+GET    /api/labs/{id}/status       # Lab status
+POST   /api/labs/{id}/stop         # Manual stop
+
+POST   /api/interviews/{id}/upload-url   # Get pre-signed URL
+POST   /api/interviews/{id}/complete     # Mark as recorded
+
+GET    /api/admin/users            # List users
+GET    /api/admin/results          # All results
+GET    /api/admin/results/{user}   # User results + cooldown info
+```
 
 ---
 
 ## Scaling Roadmap
 
-لما المنصة تكبر، هتحتاج تضيف حاجات تدريجياً:
-
 | Signal | Action |
 |--------|--------|
 | > 500 users/day | أضف Load Balancer + سيرفر ثاني |
-| > 50 concurrent labs | انقل Labs لسيرفر مستقل (8+ vCPU) |
+| > 50 concurrent labs | انقل Labs لسيرفر مستقل |
 | > 2000 users/day | فصّل Microservices |
-| > 100 concurrent labs | انتقل لـ Kubernetes + Firecracker |
-| Revenue > $5K/mo | أضف WAF + Full Monitoring (Prometheus/Grafana) |
-| Enterprise clients | SOC2 Compliance + Audit Logs |
+| > 100 concurrent labs | Kubernetes + Firecracker |
+| Revenue > $5K/mo | WAF + Full Monitoring |
 
----
-
-## Deployment (First Time)
-
-```bash
-# 1. SSH to VPS
-ssh root@your-server
-
-# 2. Install Docker + Docker Compose
-curl -fsSL https://get.docker.com | sh
-apt install docker-compose-plugin
-
-# 3. Install gVisor
-curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | tee /etc/apt/sources.list.d/gvisor.list
-apt update && apt install -y runsc
-# Configure Docker to use gVisor
-cat > /etc/docker/daemon.json << 'EOF'
-{
-  "runtimes": {
-    "runsc": {
-      "path": "/usr/bin/runsc"
-    }
-  }
-}
-EOF
-systemctl restart docker
-
-# 4. Clone project + setup
-git clone your-repo /opt/assessment-platform
-cd /opt/assessment-platform
-cp .env.example .env
-# Edit .env with real secrets
-
-# 5. Build lab images
-docker build -t lab-linux-basics ./lab-images/linux-basics/
-
-# 6. Start everything
-docker compose up -d
-
-# 7. Run migrations
-docker compose exec api alembic upgrade head
-
-# 8. Create admin user
-docker compose exec api python -m app.create_admin
-```
-
----
-
-## Sample Lab Image (Dockerfile)
-
-```dockerfile
-# lab-images/linux-basics/Dockerfile
-FROM ubuntu:22.04
-
-RUN apt-get update && apt-get install -y \
-    nginx \
-    vim \
-    curl \
-    net-tools \
-    systemctl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Setup tasks description
-COPY tasks.md /home/candidate/TASKS.md
-COPY .bashrc /root/.bashrc
-
-WORKDIR /home/candidate
-CMD ["/bin/bash"]
-```
-
-## Sample Evaluation Script
-
-```bash
-#!/bin/bash
-# evaluation_scripts/linux_basics.sh
-# Runs on filesystem snapshot, not live container
-
-SNAPSHOT_PATH=$1
-score=0
-total=100
-report=""
-
-# Task 1: Nginx installed and configured (20 points)
-if [ -f "$SNAPSHOT_PATH/etc/nginx/nginx.conf" ]; then
-    score=$((score + 10))
-    report="$report\n✅ Nginx config exists (+10)"
-fi
-if grep -q "proxy_pass" "$SNAPSHOT_PATH/etc/nginx/conf.d/default.conf" 2>/dev/null; then
-    score=$((score + 10))
-    report="$report\n✅ Proxy pass configured (+10)"
-fi
-
-# Task 2: Backup created (20 points)
-if [ -f "$SNAPSHOT_PATH/backup/data.tar.gz" ]; then
-    score=$((score + 20))
-    report="$report\n✅ Backup file created (+20)"
-fi
-
-# Task 3: User created (20 points)
-if grep -q "devops" "$SNAPSHOT_PATH/etc/passwd" 2>/dev/null; then
-    score=$((score + 20))
-    report="$report\n✅ User 'devops' created (+20)"
-fi
-
-# Task 4: Cron job (20 points)
-if [ -f "$SNAPSHOT_PATH/var/spool/cron/crontabs/root" ]; then
-    score=$((score + 20))
-    report="$report\n✅ Cron job configured (+20)"
-fi
-
-# Task 5: Firewall rules (20 points)
-if [ -f "$SNAPSHOT_PATH/etc/iptables/rules.v4" ]; then
-    score=$((score + 20))
-    report="$report\n✅ Firewall rules saved (+20)"
-fi
-
-# Output JSON
-echo "{\"score\": $score, \"total\": $total, \"report\": \"$report\"}"
-```
-
----

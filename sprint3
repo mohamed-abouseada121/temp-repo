@@ -1,0 +1,76 @@
+# Sprint 3: Linux Lab Engine & NID Validator - Technical Blueprint
+
+This sprint covers the implementation of a secure, containerized Linux environment for practical assessment, alongside a backported data-integrity feature for the National ID.
+
+## 1. Backport: National ID Structural Validator
+Before diving into the Linux Lab, we will enhance the registration endpoint (from Sprint 1) to validate the structural integrity of the Egyptian National ID.
+
+### Proposed Implementation (`app/schemas/user.py`):
+We will add a Pydantic `@field_validator` for `national_id` during registration:
+1. **Length & Type:** Must be exactly 14 digits.
+2. **Century Rule:** First digit must be `2` (1900s) or `3` (2000s).
+3. **Date of Birth Extraction:** Extract YYMMDD and validate using Python's `datetime` to ensure it's a real calendar date in the past.
+4. **Governorate Code:** Validate digits 8-9 against a predefined list of valid Egyptian governorate codes (01, 02, 11, 88, etc.).
+
+---
+
+## 2. Linux Lab Engine: Architecture
+
+The Linux Lab evaluates a candidate's practical Linux/DevOps skills by provisioning a real, isolated Ubuntu/Debian environment.
+
+### Component 1: On-Demand Container Provisioning
+We will use Docker daemon API (via the `docker` Python SDK) to spawn isolated containers per user.
+
+* **Image:** A lightweight, hardened `ubuntu:latest` or `alpine` image.
+* **Isolation:** 
+  * Disable network access (or restrict it to a specific whitelist) to prevent data exfiltration.
+  * Apply resource limits (e.g., 256MB RAM, 0.5 CPU) per container to prevent DoS attacks.
+  * Auto-destroy the container after a fixed timeout (e.g., 30 minutes).
+
+### Component 2: Web-Based Terminal (WebSocket SSH)
+Candidates will interact with the container via a web terminal (like xterm.js on the frontend).
+
+* **Backend Gateway:** A new FastAPI WebSocket endpoint (`/api/v1/lab/ws/{session_id}`).
+* **Execution:** Instead of full SSH, the WebSocket will attach to the container's `bash` process using `docker exec` (via `docker-py` or `asyncio.subprocess`).
+* **Security:** Authenticated using the `HttpOnly` JWT cookie.
+
+### Component 3: Automated Task Verification
+How do we grade the candidate's work automatically?
+
+* **Verification Scripts:** The instructor defines a bash script that returns `exit 0` if the candidate solved the task, or `exit 1` if not.
+* **Example Task:** "Create a user named 'admin' and give them sudo privileges."
+* **Verification Logic:** 
+  ```bash
+  # Verification script run silently as root by the backend:
+  id -u admin >/dev/null 2>&1 && groups admin | grep -q '\bsudo\b'
+  ```
+* **Trigger:** When the candidate clicks "Submit Lab", the backend executes the verification script inside the container, records the score, and then destroys the container.
+
+---
+
+## 3. Database Schema Updates (`app/models/lab.py`)
+
+### `Lab` Model
+Defines the lab environment and requirements.
+* `title`: string
+* `docker_image`: string
+* `duration_minutes`: int
+* `tasks`: List of `LabTask` (description, verification_script, points)
+
+### `LabSession` Model
+Tracks the candidate's container.
+* `user_id`, `lab_id`: references
+* `container_id`: string (Docker ID)
+* `status`: "Provisioning", "Running", "Submitted", "Terminated"
+* `score`: int
+
+---
+
+> [!WARNING]
+> ## Security & Infrastructure Considerations
+> Docker must be installed on the host running the backend. For local testing, we will connect to the local Docker daemon. For production, this usually requires a dedicated Docker Swarm / Kubernetes cluster or a hardened Docker socket connection. Are you comfortable with using the local Docker daemon for the implementation and testing of this sprint?
+
+> [!IMPORTANT]
+> ## Open Questions
+> 1. Should we limit the candidate to only one active container at a time across the entire platform?
+> 2. Do you want the Web Terminal to have root access (`#`) inside the container, or a restricted user account (`$`) where they must use `sudo`?

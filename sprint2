@@ -1,0 +1,491 @@
+# Sprint 2: MCQ & Written Exam Engine - Technical Blueprint
+
+This blueprint outlines the architecture for the core examination system (Phase 1 of the assessment). It leverages MongoDB (Beanie) for persistent storage, WebSockets for real-time timer/violation sync, and Redis for disconnect-resilient state management.
+
+---
+
+## 1. Database Collections (MongoDB / Beanie)
+
+### Collection: `exams`
+Stores the metadata and configuration for the available exams.
+* `_id`: ObjectId
+* `title`: String (e.g., "Software Engineering Basics")
+* `type`: String (`MCQ`, `Written`, `Lab`, `Interview`)
+* `duration_minutes`: Integer (e.g., 45)
+* `passing_score`: Integer (e.g., 70 - Percentage)
+* `cooldown_days`: Integer (default 90)
+* `is_active`: Boolean (default True)
+* `created_at`: DateTime
+
+### Collection: `questions`
+Stores all questions across all exams.
+* `_id`: ObjectId
+* `exam_id`: ObjectId (Reference to `exams`)
+* `difficulty`: String (`Easy`, `Medium`, `Hard`)
+* `type`: String (`MCQ`, `Written`)
+* `body`: String (Question text, supports Markdown)
+* `options`: Dict[str, str] (e.g., `{"A": "True", "B": "False"}` - Null for written)
+* `correct_answer`: String (e.g., "A" - Null for written)
+* `points`: Integer (default 1)
+
+### Collection: `exam_sessions`
+Tracks the candidate's attempt at an exam.
+* `_id`: ObjectId
+* `user_id`: ObjectId (Reference to `users`)
+* `exam_id`: ObjectId (Reference to `exams`)
+* `status`: String (`In_Progress`, `Passed`, `Failed`, `Violated`, `Cancelled`)
+* `score_pct`: Integer (Optional, calculated at submission)
+* `violations_count`: Integer (default 0)
+* `started_at`: DateTime
+* `finished_at`: Optional[DateTime]
+* `answers`: Dict[str, str] (Maps `question_id` (string) to `user_answer`)
+
+### Collection: `violation_logs`
+Detailed logs of cheating attempts or tab switches.
+* `_id`: ObjectId
+* `session_id`: ObjectId (Reference to `exam_sessions`)
+* `type`: String (`Tab_Change`, `Focus_Lost`, `Fullscreen_Exit`, `Copy_Paste`)
+* `metadata`: Dict (JSON data like browser info, screen size)
+* `occurred_at`: DateTime
+
+---
+
+## 2. Real-Time State Management (Redis)
+
+To protect against network failures and browser crashes, the candidate's active exam state is cached in Redis and synced every 10 seconds.
+
+### Redis Key: `exam:session:{session_id}` (Hash)
+* `user_id`: String (ObjectId)
+* `exam_id`: String (ObjectId)
+* `expires_at`: ISO Timestamp (e.g., `2026-06-07T02:00:00Z`). Computed at start as `started_at + duration_minutes`.
+* `violations_count`: Integer
+* `answers`: JSON String (Map of `question_id` -> `answer`)
+
+*TTL for Key:* Exam Duration + 30 minutes. If a user disconnects, their answers and time remain frozen in Redis until they reconnect, provided they are within the `expires_at` window.
+
+---
+
+## 3. WebSocket Protocol (FastAPI)
+
+A persistent WebSocket connection manages the server-authoritative timer, auto-saving, and real-time warnings.
+
+**Endpoint:** `ws://localhost:8000/api/v1/exam/ws/{session_id}`
+*(Connection requires a valid JWT Access Token passed in protocols or query params).*
+
+### Flow:
+1. **Init:** Server sends remaining time and the full list of generated questions.
+2. **Tick Loop:** Server pushes `time_sync` every 10 seconds.
+3. **Save Answer:** Client pushes `{action: "save_answer", payload: {q_id, ans}}`. Server updates Redis immediately.
+4. **Log Violation:** Client pushes `{action: "log_violation", payload: {type}}`. Server increments violation count. If count >= 3, server terminates the exam.
+5. **Submit:** Client pushes `{action: "submit"}` or Time Expires -> Server grades exam, updates MongoDB, and drops Redis key.
+
+---
+
+## 4. Frontend Security & Proctoring (Next.js)
+
+The frontend uses modern browser APIs to monitor the user's environment.
+
+*   **Visibility Change:** Detects when the user changes tabs.
+    ```javascript
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) ws.send({action: "log_violation", payload: {type: "Tab_Change"}})
+    });
+    ```
+*   **Window Blur:** Detects when the user clicks outside the browser (e.g., Discord, IDE).
+*   **Fullscreen Lock:** Forces the exam into fullscreen and detects exits via `fullscreenchange`.
+*   **Clipboard Blocking:** Overrides `copy`, `paste`, and `contextmenu` events.
+
+---
+
+## 5. Auto-Grading & Cooldown Engine
+
+When the exam finishes (by submission, timeout, or 3 violations):
+
+1.  **Violation Check:** If `violations_count >= 3`, status becomes `Violated`. (Immediate fail, triggers 3-month cooldown).
+2.  **Scoring (MCQ):** Iterates over submitted answers against `questions.correct_answer`.
+3.  **Status Calculation:** If `score_pct >= passing_score`, status is `Passed`. Otherwise `Failed` (Triggers 3-month cooldown).
+4.  **Database Commit:** The final state and answers are transferred from Redis to the `exam_sessions` collection in MongoDB.
+
+### Cooldown Logic:
+Before allowing a user to start an exam, the system queries:
+```python
+last_attempt = await ExamSession.find(
+    ExamSession.user_id == current_user.id,
+    ExamSession.exam_id == target_exam.id,
+    In(ExamSession.status, ["Failed", "Violated"])
+).sort("-finished_at").first_or_none()
+```
+If `last_attempt` was within 90 days, the API returns a `403 Forbidden` with the remaining cooldown time.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+. تصميم مجموعات MongoDB باستخدام Beanie
+1.1 مجموعة exams – بيانات الامتحان الثابتة
+هذه المجموعة تخزن وصف الامتحان وإعداداته، وهي مرجعية لجميع الجلسات والأسئلة.
+
+json
+{
+  "_id": ObjectId("..."),
+  "title": "Software Engineering Basics",
+  "type": "MCQ",               // أو Written, Lab, Interview
+  "duration_minutes": 45,
+  "passing_score": 70,         // النسبة المئوية المطلوبة للنجاح
+  "cooldown_days": 90,         // فترة المنع بعد الرسوب أو المخالفة
+  "is_active": true,
+  "created_at": "2026-01-01T..."
+}
+ملاحظات مهمة:
+
+حقل type يسمح بتوسيع النظام لاحقاً لأنواع أخرى من الامتحانات (Lab العملي، Interview الشفهي).
+
+cooldown_days يُطبق فقط عندما تكون الحالة Failed أو Violated، وليس عند Passed (يمكن للطالب الناجح إعادة الامتحان متى أراد، لكن عادة لا يحتاج).
+
+توصية: أضف حقل max_violations_allowed لكل امتحان على حدة، بدلاً من القيمة الثابتة 3 في الكود. هذا يمنح مرونة أكبر (مثلاً امتحان حساس جداً قد يطرد من أول مخالفة).
+
+1.2 مجموعة questions – بنك الأسئلة
+json
+{
+  "_id": ObjectId("..."),
+  "exam_id": ObjectId("..."),
+  "difficulty": "Medium",
+  "type": "MCQ",
+  "body": "ما هو المبدأ الأساسي في SOLID؟",
+  "options": {
+    "A": "Single Responsibility",
+    "B": "Open/Closed",
+    "C": "Liskov Substitution",
+    "D": "All of the above"
+  },
+  "correct_answer": "D",
+  "points": 1
+}
+للأسئلة المقالية (Written): يكون options: null و correct_answer: null، ويتم التصحيح البشري لاحقاً.
+
+تحسين مقترح (مناقش سابقاً):
+أضف حقل grading_status للأسئلة المقالية داخل جلسة الامتحان (وليس هنا)، لأن التصحيح يتم لكل محاولة. أما هنا فيمكن إضافة auto_gradable: true/false لتمييز الأسئلة التي يمكن تصحيحها آلياً.
+
+1.3 مجموعة exam_sessions – جلسات المحاولات
+هذه المجموعة تسجل كل محاولة يقوم بها مستخدم، وتكون بمثابة السجل النهائي بعد انتهاء الامتحان.
+
+json
+{
+  "_id": ObjectId("..."),
+  "user_id": ObjectId("..."),
+  "exam_id": ObjectId("..."),
+  "status": "In_Progress",   // أو Passed, Failed, Violated, Cancelled
+  "score_pct": null,         // تُحسب عند التصحيح
+  "violations_count": 0,
+  "started_at": "2026-06-07T10:00:00Z",
+  "finished_at": null,
+  "answers": {
+    "question_id_1": "B",
+    "question_id_2": "النص الطويل للإجابة المقالية..."
+  }
+}
+ملاحظات نقدية مهمة (بناءً على مناقشتنا السابقة):
+
+تخزين الإجابات كـ Dict[str, str] يفقد الميتاداتا الزمنية.
+الأفضل أن يكون:
+
+json
+"answers": {
+  "q1": {
+    "answer": "B",
+    "saved_at": "2026-06-07T10:15:30Z",
+    "last_modified": "2026-06-07T10:15:30Z"
+  }
+}
+هذا يسمح بتحليل وقت التعديلات واكتشاف الأنماط المشبوهة (مثل تغيير الإجابة عدة مرات في آخر دقيقة).
+
+لا يوجد حقل grading_status للأسئلة المقالية.
+أضف:
+
+json
+"written_grading": {
+  "q3": { "status": "pending", "reviewed_by": null, "score": null }
+}
+معلومة مهمة: لا يتم تخزين الأسئلة نفسها داخل الجلسة (لتجنب التكرار)، بل يتم ربطها عبر question_id. هذا صحيح، لكن يجب التأكد من أن الأسئلة لا تتغير بعد بدء الجلسة – لذلك يُفضل عمل نسخة ثابتة (snapshot) من الأسئلة داخل الجلسة أو في Collection منفصل session_questions لضمان عدم تأثير تعديل بنك الأسئلة على امتحانات قيد التنفيذ. الحل الأبسط: عند بدء الجلسة، يتم نسخ الأسئلة المستخدمة إلى session_questions كوثائق منفصلة مرتبطة بـ session_id.
+
+1.4 مجموعة violation_logs – سجل المخالفات التفصيلي
+json
+{
+  "_id": ObjectId("..."),
+  "session_id": ObjectId("..."),
+  "type": "Tab_Change",
+  "metadata": {
+    "browser": "Chrome 120",
+    "screen_size": "1920x1080",
+    "timestamp": "2026-06-07T10:05:00Z"
+  },
+  "occurred_at": "2026-06-07T10:05:00Z"
+}
+تحسين مقترح: إضافة violation_rules Collection مستقلة كما ناقشنا سابقاً، بحيث يتم حساب النقاط ديناميكياً:
+
+json
+// violation_rules
+{
+  "type": "Tab_Change",
+  "points": 1,
+  "action": "warn"   // أو "terminate" بعد تجاوز الحد
+}
+ثم في الجلسة، يتم جمع النقاط بدلاً من مجرد عدد المخالفات، مما يسمح بتفاوت درجة الخطورة.
+
+2. إدارة الحالة اللحظية باستخدام Redis
+Redis تلعب دور طبقة التخزين المؤقت المقاومة للانقطاع (Disconnect-Resilient Cache). كل جلسة امتحان نشطة تُخزن في Redis بالمفتاح exam:session:{session_id} من نوع Hash.
+
+الحقول المخزنة:
+الحقل	النوع	مثال	شرح
+user_id	String	"67a1b2c3..."	معرف المستخدم
+exam_id	String	"67a1b2c3..."	معرف الامتحان
+expires_at	ISO timestamp	"2026-06-07T10:45:00Z"	وقت انتهاء الامتحان (start + duration)
+violations_count	Integer	2	عدد المخالفات (أو مجموع النقاط)
+answers	JSON String	"{\"q1\":\"B\",\"q2\":\"نص\"}"	إجابات الطالب حتى اللحظة
+TTL (Time To Live): مدة الامتحان + 30 دقيقة إضافية. هذا يضمن أن الطالب الذي قطع اتصاله فجأة يستطيع العودة واستئناف الامتحان من آخر نقطة، طالما لم ينتهِ وقت الامتحان الأصلي.
+
+تحسين مقترح (مناقش سابقاً):
+أضف الحقول التالية لتحسين التعافي:
+
+current_question_index: لتذكر آخر سؤال كان يعرضه الطالب.
+
+last_heartbeat: آخر وقت استقبل فيه الخادم نبضة من العميل.
+
+answers غير كافٍ لوحده – خزّن answers كـ Hash منفصل بحيث يمكن تحديث إجابة واحدة دون إعادة كتابة الـ JSON كاملاً (لتجنب سباقات التحديث). لكن يمكن البدء بالطريقة الحالية.
+
+سيناريو استرداد الجلسة:
+عندما يحاول الطالب الاتصال مرة أخرى، يتحقق الخادم من وجود المفتاح في Redis. إذا كان موجوداً ولم ينتهِ expires_at، فإنه يستعيد الحالة ويرسلها للعميل، مع خصم الوقت المنقضي.
+
+3. بروتوكول WebSocket (FastAPI)
+WebSocket يوفر قناة اتصال ثنائية الاتجاه في الوقت الفعلي، ضرورية لثلاثة أسباب:
+
+مزامنة الوقت بشكل موثوق (الساعة على الخادم وليس العميل).
+
+حفظ الإجابات فوراً (auto-save).
+
+إرسال المخالفات والإنذارات فوراً.
+
+نقطة النهاية:
+text
+ws://localhost:8000/api/v1/exam/ws/{session_id}
+المصادقة: المخطط يذكر "passed in protocols or query params".
+تحذير أمني مهم (مثلما ناقشنا سابقاً): لا تستخدم query params لتمرير JWT أبداً لأنه يتم تسجيلها في logs الخوادم والـ proxies. الحلول الصحيحة:
+
+Authorization header (مدعوم في WebSocket لكن بعض المكتبات لا تسمح به بسهولة).
+
+Sec-WebSocket-Protocol (نقل التوكن كبروتوكول فرعي).
+
+HttpOnly Cookie (الأفضل والأسهل، لأنه يُرسل تلقائياً مع طلب WebSocket).
+
+تدفق الرسائل (كما هو موضح في المخطط):
+من الخادم إلى العميل:
+
+init: يرسل الوقت المتبقي وقائمة الأسئلة الكاملة (سنناقش هذا لاحقاً).
+
+time_sync: يُرسل كل 10 ثوانٍ لتحديث العداد.
+
+warning: يُرسل عند وصول المخالفات إلى حد معين (مثلاً "تبقى مخالفة واحدة ويتم الإلغاء").
+
+exam_terminated: يُرسل عند طرد الطالب لكثرة المخالفات أو انتهاء الوقت.
+
+من العميل إلى الخادم:
+
+save_answer: يحمل q_id و ans.
+
+log_violation: يحمل نوع المخالفة.
+
+submit: لإنهاء الامتحان طواعية.
+
+خلاف مع المخطط حول "إرسال قائمة الأسئلة الكاملة":
+المخطط يقول "full list of generated questions". كما ناقشنا سابقاً، هذا يعرض الأسئلة للاطلاع عليها دفعة واحدة عبر أدوات المطور. الأفضل إرسال سؤال واحد في كل مرة، وعندما يجيب الطالب، يُرسل السؤال التالي. ولكن هذا يسبب تأخيراً في الشبكة. الحل الوسط:
+
+إرسال 3-5 أسئلة مسبقاً (prefetch) مع الاحتفاظ بالباقي في الخادم.
+
+أو تشفير الأسئلة على الخادم وإرسالها جميعاً، مع فك التشفير تدريجياً على العميل (لكنه معقد وقد يُفك مرة واحدة).
+
+توصية للمخطط الحالي: اذكر أنك ستُرسل الأسئلة بشكل متدفق (streamed) أو مقسمة إلى صفحات، معتبراً أن "full list" يقصد به قائمة معرفات الأسئلة فقط، ويتم جلب كل سؤال على حدة عبر طلب HTTP منفصل (لكنه يزيد عدد الطلبات). الأفضل: عبر WebSocket نفسه، يرسل الخادم السؤال الأول، ثم بناءً على طلب "next_question" يرسل التالي.
+
+4. الأمان والمراقبة في الواجهة الأمامية (Next.js)
+يستخدم المخطط مجموعة من أحداث المتصفح لمراقبة سلوك الطالب.
+
+4.1 كشف تغيير التبويب (Tab Change)
+javascript
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    ws.send({action: "log_violation", payload: {type: "Tab_Change"}});
+  }
+});
+هذا يعمل فقط إذا كان الطالب داخل نفس المتصفح. لا يمنع فتح متصفح آخر أو استخدام هاتف آخر. لكنه كافٍ للمستوى الأساسي.
+
+4.2 كشف فقدان التركيز (Window Blur)
+javascript
+window.addEventListener("blur", () => {
+  ws.send({action: "log_violation", payload: {type: "Focus_Lost"}});
+});
+يُسجل عندما ينقر الطالب خارج نافذة المتصفح (مثل فتح برنامج آخر). قد يعطي نتائج إيجابية كاذبة إذا ظهر إشعار نظام.
+
+4.3 قفل ملء الشاشة (Fullscreen Lock)
+يتم طلب ملء الشاشة عند بدء الامتحان:
+
+javascript
+document.documentElement.requestFullscreen();
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement) {
+    ws.send({action: "log_violation", payload: {type: "Fullscreen_Exit"}});
+  }
+});
+تحذير: لا يمكن强制 ملء الشاشة إلا كرد فعل على إجراء المستخدم (مثل نقرة زر). لذا يجب أن يبدأ الامتحان بزر "بدء الاختبار" يطلب ملء الشاشة أولاً.
+
+4.4 منع النسخ واللصق
+javascript
+document.addEventListener("copy", (e) => { e.preventDefault(); });
+document.addEventListener("paste", (e) => { e.preventDefault(); });
+document.addEventListener("contextmenu", (e) => { e.preventDefault(); });
+هذه الإجراءات تمنع القائمة اليمنى والنسخ واللصق، لكنها لا تمنع استخدام اختصارات لوحة المفاتيح مثل Ctrl+C بشكل كامل (يمكن override أيضاً).
+ملاحظة: المستخدم الماهر يمكنه تعطيل هذه الـ event listeners عبر DevTools. لذلك، هذا مجرد رادع، وليس حلاً أمنياً مطلقاً.
+
+تحسين مقترح: أضف كشفاً لاستخدام أدوات المطور (DevTools) عبر قياس الفرق بين عرض النافذة وعرض الشاشة، أو كشف window.devtools، لكنه ليس مضموناً. الأفضل الاعتماد على المخالفات اللاحقة (تغيير التبويب، فقدان التركيز) لأن الطالب الذي يفتح DevTools سيضطر إلى مغادرة النافذة أو تغيير التبويب.
+
+5. محرك التصحيح التلقائي وآلية التبريد (Cooldown)
+5.1 عملية التصحيح عند انتهاء الامتحان
+عند حدوث أي من هذه الأحداث:
+
+المستخدم يضغط submit.
+
+يصل الوقت المتبقي إلى 0 (يتم التحقق من الخادم وليس العميل).
+
+عدد المخالفات يتجاوز الحد المسموح (3 في المخطط الحالي).
+
+يتولى الخادم الخطوات التالية:
+
+جلب بيانات الجلسة من Redis (آخر إجابات محفوظة).
+
+تحديد الحالة مبدئياً بناءً على المخالفات:
+
+إذا violations_count >= 3 → status = Violated (فشل فوري، يدخل في فترة التبريد).
+
+تصحيح الأسئلة الموضوعية (MCQ):
+يتم استعلام الأسئلة من MongoDB ومقارنة إجابة الطالب مع correct_answer. تجميع النقاط وحساب النسبة المئوية.
+
+تحديد النجاح أو الرسوب:
+
+إذا score_pct >= passing_score → Passed.
+
+وإلا → Failed (يدخل في فترة التبريد).
+
+تخزين النتيجة النهائية والإجابات في MongoDB (في exam_sessions).
+
+حذف مفتاح Redis لمنع أي محاولة لاحقة لاستئناف الجلسة.
+
+إرجاع النتيجة للعميل (عبر WebSocket ثم إغلاق الاتصال).
+
+ملاحظة نقدية حساسة:
+أين يتم تخزين الإجابات المقالية التي تحتاج لمراجعة بشرية؟ في المخطط الحالي، حقل answers يحوي نص الإجابة، ولكن لا توجد آلية لربطها بالتصحيح البشري. اقتراح:
+
+أضف حقل written_answers منفصل أو أضف علامة needs_review لكل سؤال مقالي في الجلسة.
+
+بعد التصحيح التلقائي للموضوعي، تبقى حالة الامتحان Pending_Review بدلاً من Passed/Failed، ثم في Sprint 4 يقوم المشرف بتصحيح المقالي وتحديث الحالة.
+
+5.2 منطق التبريد (Cooldown)
+قبل السماح للمستخدم ببدء امتحان جديد، يتم الاستعلام:
+
+python
+last_attempt = await ExamSession.find_one(
+    ExamSession.user_id == current_user.id,
+    ExamSession.exam_id == exam.id,
+    ExamSession.status.in_(["Failed", "Violated"]),
+    sort=[("finished_at", -1)]
+)
+if last_attempt and (datetime.now() - last_attempt.finished_at).days < exam.cooldown_days:
+    remaining = exam.cooldown_days - (datetime.now() - last_attempt.finished_at).days
+    raise HTTPException(403, f"يجب الانتظار {remaining} يوماً قبل إعادة المحاولة")
+تحسينات مقترحة:
+
+يجب استثناء الحالة Cancelled (إذا ألغى الطالب الامتحان بإرادته قبل البدء بفترة قصيرة).
+
+يجب السماح للمستخدم الناجح بإعادة الامتحان متى شاء (لا تبريد).
+
+يمكن إضافة تبريد أكثر صرامة للمخالفين (مثلاً 180 يوماً بدلاً من 90).
+
+6. حالات الحافة (Edge Cases) التي يجب معالجتها
+6.1 سباق الإرسال (Submission Race Condition)
+كما ناقشنا سابقاً: ماذا لو أرسل العميل طلب submit وفي نفس الثانية انتهى الوقت من جانب الخادم؟
+الحل: استخدام قفل (lock) على session_id في Redis أو قاعدة البيانات، والتحقق من الحالة مرتين:
+
+python
+async def finalize_session(session_id):
+    async with redis_lock(f"finalize:{session_id}"):
+        session = await get_session(session_id)
+        if session.status != "In_Progress":
+            return "already_finalized"
+        # ... التصحيح والحفظ ...
+6.2 انقطاع WebSocket أثناء الامتحان
+إذا انقطع الاتصال، يستمر Redis في تخزين الحالة. لدى العميل وظيفة إعادة محاولة الاتصال (exponential backoff).
+
+عند إعادة الاتصال، يرسل الخادم الحالة المخزنة في Redis ويسمح بالاستمرار.
+
+لكن إذا انقطع الاتصال لأكثر من TTL (مدة الامتحان + 30 دقيقة)، تفقد الجلسة. لذا يجب أن تكون TTL كافية.
+
+6.3 التلاعب بساعة العميل (Client-Side Clock)
+الاعتماد على ساعة الخادم فقط. WebSocket يرسل time_sync كل 10 ثوانٍ، ويتم تحديث العداد على العميل بناءً على قيمة الخادم. أي محاولة لتغيير ساعة النظام المحلي لن تؤثر.
+
+6.4 فتح أكثر من تبويب لنفس الامتحان
+يجب منع ذلك. عند بدء الجلسة، يمكن تخزين active_session في Redis أو في جدول active_sessions في قاعدة البيانات. إذا حاول المستخدم فتح تبويب آخر، يتم رفض الاتصال وإغلاق القديم (أو إعطاء تحذير).
+
+7. تحسينات رئيسية مقترحة (بناءً على مناقشتنا السابقة)
+تخزين الإجابات مع الطوابع الزمنية في MongoDB و Redis (كما هو مقترح في النقطة 2 من التحليل).
+
+إضافة جدول violation_rules لجعل نظام المخالفات قابلاً للتكوين عبر واجهة إدارية.
+
+إرسال الأسئلة تدريجياً بدلاً من إرسال القائمة الكاملة، لتقليل سطح الهجوم.
+
+استخدام HttpOnly Cookies للمصادقة بدلاً من query params في WebSocket.
+
+إضافة خاصية heartbeat من العميل كل 30 ثانية لاكتشاف الانقطاعات مبكراً.
+
+نسخة ثابتة من الأسئلة (snapshot) عند بدء الجلسة لضمان عدم تغيرها أثناء الامتحان.
+
+دعم الإجابات المقالية مع حالة pending_review وتكامل مع Sprint 4.
+
+8. مخطط التدفق الكامل للامتحان (من البداية إلى النهاية)
+خلاصة
+هذا المخطط التقني لـ Sprint 2 يقدم نظام امتحانات قوي ومقاوم للأعطال، مع استخدام مزيج من MongoDB للتخزين الدائم، وRedis للحالة اللحظية، وWebSockets للمزامنة الفورية. نقاط القوة:
+
+القدرة على استئناف الامتحان بعد انقطاع الاتصال.
+
+تصحيح تلقائي للأسئلة الموضوعية.
+
+نظام تبريد يمنع إعادة المحاولة المتكررة بعد الرسوب.
+
+المجالات التي تحتاج إلى تحسين (كما ناقشنا):
+
+تفصيل تخزين الإجابات بالطوابع الزمنية.
+
+إضافة نظام مرن للمخالفات (points بدلاً من count).
+
+تحسين أمان WebSocket (عدم استخدام query params).
+
+إرسال الأسئلة تدريجياً.
+
+دعم الإجابات المقالية مع انتظار المراجعة البشرية.
+
+إذا تم تنفيذ هذه التحسينات، فإن النظام سيكون جاهزاً للإنتاج ويغطي معظم متطلبات منصة امتحانات حقيقية.
+

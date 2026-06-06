@@ -1,0 +1,49 @@
+# Sprint 5: Polish, Launch, & AI Processing - Implementation Plan
+
+This final sprint bridges the gap between a feature-complete application and a production-ready enterprise system. We will integrate the remaining launch features outlined in the project roadmap alongside the AI transcriptions we deferred from Sprint 4.
+
+## 1. HR Results Dashboard & Analytics (`app/api/hr.py`)
+Provides the backend endpoints necessary to serve a comprehensive HR interface.
+* **`GET /dashboard/overview`**: Basic analytics (Total candidates, pass/fail rates, active cooldowns).
+* **`GET /dashboard/candidates`**: Paginated list of candidates, their aggregated scores (MCQ + Lab), and their cooldown statuses.
+* **`GET /dashboard/interview/{session_id}`**: Retrieves interview answers and generates **S3 Pre-Signed GET URLs** so HR can stream the video securely.
+* **`POST /dashboard/evaluate/{session_id}`**: HR submits final `hr_score` and `hr_feedback`.
+
+## 2. Background Tasks: Email Notifications & AI Speech-to-Text
+Since sending emails and processing audio take time, we will use **FastAPI `BackgroundTasks`** (or Celery for scaling) to handle these without blocking the user.
+
+* **Email Notifications**:
+  * Invite to assessment.
+  * Results/Score notification upon completion.
+  * Cooldown expiry notification (using a daily cron job).
+* **AI Transcription (Whisper)**:
+  * Triggers after the One-Way Interview is submitted.
+  * Fetches the video, runs OpenAI Whisper (mocked for now), and saves the `transcript`.
+
+## 3. Security Audit
+A thorough review of the codebase to ensure production security:
+* Verify all endpoints enforce `get_current_user`.
+* Ensure `HttpOnly` and `Secure` flags are set on JWT cookies.
+* Validate that S3 Pre-Signed URLs have strictly limited lifespans.
+* Audit Docker container constraints (PIDs limit, No-New-Privileges).
+* Ensure rate-limiting is applied (e.g., using `slowapi`) to prevent brute-forcing endpoints like `/login`.
+
+## 4. Load Testing (100+ Users)
+* **Tool:** `Locust` (Python-based load testing).
+* **Target:** Simulate 100 concurrent candidates registering, starting an MCQ exam, opening WebSockets, answering questions, and submitting simultaneously.
+* **Goal:** Verify that MongoDB and Redis do not bottleneck under heavy concurrent writes.
+
+## 5. Deployment to Production
+* Create a `docker-compose.yml` to orchestrate:
+  * FastAPI Application
+  * MongoDB Container
+  * Redis Container
+  * MinIO (for local S3-compatible storage)
+* Provide environment variable configurations (`.env.production`).
+
+---
+
+> [!IMPORTANT]
+> ## Open Questions for the Tech Lead
+> 1. **Email Provider:** For the email notifications, do you want to use a mock SMTP server (like Mailhog) for local testing, or integrate a real service like SendGrid / Amazon SES?
+> 2. **Load Testing:** Should I include the Locust script inside the repository (`tests/locustfile.py`) so you can run it yourself?

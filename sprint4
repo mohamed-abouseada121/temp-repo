@@ -1,0 +1,62 @@
+# Sprint 4: One-Way Interview Engine - Implementation Plan
+
+This sprint focuses on the final stage of the assessment platform: the asynchronous "One-Way Interview". Candidates are presented with questions and must record their video responses within a time limit.
+
+## 1. Architectural Strategy: Client-Direct Uploads
+Handling large video files directly through a Python FastAPI backend can lead to massive memory consumption, slow performance, and worker starvation.
+
+**Proposed Solution: Pre-Signed URLs (S3 Compatible)**
+1. The backend does **not** process video files.
+2. When a candidate reaches a question, the backend generates a temporary, secure **Pre-Signed URL** (using AWS S3, MinIO, or Cloudflare R2).
+3. The frontend records the video using the browser's `MediaRecorder` API (WebM format).
+4. The frontend uploads the video blob **directly** to the cloud storage using the Pre-Signed URL via a simple `PUT` request.
+5. Once the upload finishes, the frontend notifies the backend to save the video path and proceed to the next question.
+
+*Benefits: Zero bandwidth/CPU load on our backend, infinitely scalable, and fast.*
+
+## 2. Database Schema Updates (`app/models/interview.py`)
+
+### `Interview` Model
+Defines the interview structure.
+* `title`: string
+* `description`: string
+* `questions`: List of `InterviewQuestion`
+  * `id`: string
+  * `text`: string (e.g., "Tell us about a time you resolved a conflict.")
+  * `think_time_seconds`: int (Time allowed before recording starts)
+  * `answer_time_seconds`: int (Maximum recording time)
+* `cooldown_days`: int (Default 90)
+* `is_active`: bool
+
+### `InterviewSession` Model
+Tracks the candidate's interview progress.
+* `user_id`, `interview_id`: references
+* `status`: "In_Progress", "Submitted", "Failed", "Evaluated"
+* `answers`: Dictionary mapping `question_id` to `s3_object_key` (The path to the video in the cloud)
+* `started_at`, `finished_at`: datetime
+
+## 3. API Endpoints (`app/api/interview.py`)
+
+* **`POST /start/{interview_id}`**: 
+  * Checks for cooldowns and active sessions (similar to Lab).
+  * Creates an `InterviewSession`.
+* **`GET /session/{session_id}/question/{question_id}/upload-url`**: 
+  * Validates that the user owns the session.
+  * Generates an S3 Pre-Signed `PUT` URL valid for exactly the length of the recording time + a 2-minute buffer.
+* **`POST /session/{session_id}/answer`**:
+  * Called by the frontend after successfully uploading to S3.
+  * Saves the `s3_object_key` in the `InterviewSession.answers`.
+* **`POST /submit/{session_id}`**:
+  * Marks the entire interview as "Submitted" so HR can review it later.
+
+---
+
+> [!WARNING]
+> ## Infrastructure Requirement
+> This implementation requires an S3-compatible cloud storage bucket. For local development and testing, we can use a mock storage service or install **MinIO** (an open-source S3 alternative) locally, or we can simply mock the S3 URL generation in `pytest`.
+
+> [!IMPORTANT]
+> ## Open Questions for the Tech Lead
+> 1. **AI Processing:** Do we want to integrate an AI Speech-to-Text service (like OpenAI Whisper) in the background (using Celery/BackgroundTasks) after the user uploads the video, so HR can read the transcript instead of watching the whole video?
+> 2. **Proctoring:** Should we apply the same Tab-Change / Focus-Loss violation rules to the Interview stage as we did in the MCQ stage?
+> 3. **Retakes:** Are candidates allowed to re-record their answer if they stumble, or is it strictly a "one-shot" recording per question?

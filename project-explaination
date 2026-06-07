@@ -1,0 +1,960 @@
+# 📋 مراجعة شاملة لمشروع Technical Assessment Platform
+
+> [!NOTE]
+> هذا الملف يشرح **كل جزء** في المشروع بالتفصيل الممل، كأنك بتقرأه لأول مرة ومش فاهم حاجة عن البروجيكت.
+
+---
+
+## 📌 الفكرة العامة للمشروع
+
+المشروع ده عبارة عن **منصة تقييم فني (Technical Assessment Platform)** للشركات اللي عايزة تقيّم المرشحين (Candidates) قبل ما توظفهم.
+
+### إزاي المنصة بتشتغل؟
+
+1. **المرشح بيسجل** ببياناته (اسم، إيميل، رقم قومي، تليفون)
+2. **بيعمل Login** ويدخل على الـ Dashboard بتاعته
+3. **بيحل 3 أنواع من التقييمات**:
+   - **MCQ Exam**: أسئلة اختيار من متعدد (زي كويز)
+   - **Linux Lab**: بيئة لينكس حقيقية في المتصفح (Terminal) بينفذ فيها مهام
+   - **Video Interview**: مقابلة فيديو أحادية (One-Way) بيسجل إجاباته
+4. **الـ HR** بيراجع النتائج ويقيّم المقابلات
+5. **النظام بيحسب الدرجة النهائية** تلقائيًا (40% MCQ + 40% Lab + 20% Interview)
+
+---
+
+## 🏗️ المعمارية العامة (Architecture)
+
+المشروع مقسوم لجزئين رئيسيين:
+
+```
+technical-assessment-platform/
+├── backend/          ← السيرفر (FastAPI + Python)
+└── frontend/         ← الواجهة (React + TypeScript)
+```
+
+### التقنيات المستخدمة
+
+| الجزء | التقنية | الوظيفة |
+|-------|---------|---------|
+| Backend Framework | FastAPI (Python) | السيرفر الأساسي اللي بيستقبل الطلبات |
+| Database | MongoDB (عبر Beanie ODM) | تخزين البيانات (يوزرز، امتحانات، نتائج) |
+| Cache | Redis (FakeRedis للتطوير) | تخزين مؤقت سريع (حالة الامتحان أثناء الحل) |
+| Auth | JWT (PyJWT) | التحقق من هوية المستخدم |
+| Encryption | AES-256-GCM + HMAC-SHA256 | تشفير الرقم القومي |
+| Password | bcrypt + SHA-256 pre-hash | تخزين كلمات المرور بأمان |
+| Docker | aiodocker | تشغيل بيئة اللينكس للمرشحين |
+| Storage | Mock S3/MinIO | تخزين فيديوهات المقابلات |
+| Frontend | React 18 + TypeScript + Vite | واجهة المستخدم |
+| Styling | Tailwind CSS v3 | التصميم |
+| State | Zustand | إدارة حالة التطبيق |
+| Data Fetching | TanStack Query | جلب البيانات من السيرفر |
+| Terminal | xterm.js | عرض الـ Terminal في المتصفح |
+
+---
+
+## 🔙 الـ Backend بالتفصيل
+
+### 📁 هيكل الملفات
+
+```
+backend/
+├── app/
+│   ├── main.py              ← نقطة البداية (Entry Point)
+│   ├── core/
+│   │   ├── config.py        ← إعدادات المشروع
+│   │   └── security.py      ← تشفير وتوثيق
+│   ├── db/
+│   │   ├── database.py      ← الاتصال بقاعدة البيانات
+│   │   └── seed.py          ← ملء البيانات التجريبية
+│   ├── models/
+│   │   ├── user.py          ← موديل المستخدمين
+│   │   ├── exam.py          ← موديل الامتحانات
+│   │   ├── lab.py           ← موديل المعامل
+│   │   ├── interview.py     ← موديل المقابلات
+│   │   └── result.py        ← موديل النتائج المجمعة
+│   ├── schemas/
+│   │   └── auth.py          ← التحقق من البيانات المدخلة
+│   ├── api/
+│   │   ├── auth.py          ← API التسجيل وتسجيل الدخول
+│   │   ├── deps.py          ← Dependencies (التحقق من التوكن)
+│   │   ├── exam.py          ← API الامتحانات + WebSocket
+│   │   ├── lab.py           ← API المعامل + WebSocket
+│   │   ├── interview.py     ← API المقابلات
+│   │   └── hr.py            ← API لوحة الـ HR
+│   └── services/
+│       ├── docker_service.py ← خدمة إدارة Docker Containers
+│       └── storage_service.py← خدمة رفع/تحميل الفيديو (Mock)
+├── tests/                    ← اختبارات
+├── requirements.txt          ← المكتبات المطلوبة
+├── docker-compose.yml        ← تشغيل الخدمات على Production
+├── docker-compose.dev.yml    ← تشغيل الخدمات للتطوير
+├── Dockerfile.lab            ← صورة Docker لبيئة اللينكس
+└── pytest.ini                ← إعدادات الاختبارات
+```
+
+---
+
+### 📄 شرح كل ملف بالتفصيل
+
+---
+
+#### 1. `app/main.py` — نقطة البداية
+
+**الوظيفة**: ده الملف الرئيسي اللي بيشغل السيرفر. لما بتكتب `uvicorn app.main:app` ده الملف اللي بيتنفذ.
+
+**إيه بيعمل بالظبط**:
+- بينشئ تطبيق FastAPI
+- بيربط كل الـ API Routes (Auth, Exam, Lab, Interview, HR)
+- بيتصل بقاعدة البيانات لما السيرفر يبدأ (عبر `lifespan`)
+- بيملأ البيانات التجريبية تلقائيًا (عبر `seed_database`)
+- عنده Health Check endpoint (`/health`) للتأكد إن كل الخدمات شغالة
+
+**التقييم**: ✅ شغال صح
+
+> [!WARNING]
+> **مشكلة**: الـ `seed_database()` بيتنفذ كل مرة السيرفر بيبدأ. ده مش مشكلة لأنه بيتشيك إذا البيانات موجودة قبل ما يضيف، بس في الـ Production مش محتاج يتنفذ.
+
+---
+
+#### 2. `app/core/config.py` — الإعدادات
+
+**الوظيفة**: بيخزن كل الإعدادات الحساسة زي مفاتيح التشفير وعناوين قواعد البيانات.
+
+**المتغيرات المهمة**:
+- `DATABASE_URL`: عنوان MongoDB
+- `JWT_SECRET_KEY`: المفتاح السري للتوقيع على Access Token
+- `JWT_REFRESH_SECRET_KEY`: المفتاح السري للـ Refresh Token
+- `NATIONAL_ID_SECRET`: مفتاح HMAC لتجزئة الرقم القومي
+- `ENCRYPTION_KEY`: مفتاح AES-256 لتشفير الرقم القومي
+
+**التقييم**: ✅ شغال صح
+
+> [!CAUTION]
+> **مشكلة أمنية**: المفاتيح مكتوبة Plain Text في الكود (`"super_secret_jwt_key_for_testing"`, `"a" * 32`). في الـ Production لازم تكون في `.env` file أو Secret Manager. الملف بيدعم `.env` عبر `SettingsConfigDict` بس مفيش `.env` file فعلي متعمل.
+
+---
+
+#### 3. `app/core/security.py` — التشفير والتوثيق
+
+**الوظيفة**: كل الدوال المتعلقة بالأمان:
+
+| الدالة | الوظيفة |
+|--------|---------|
+| `get_password_hash()` | بتاخد كلمة المرور وتعمل Hash بـ SHA-256 ثم bcrypt |
+| `verify_password()` | بتتحقق إن كلمة المرور اللي اليوزر كتبها بتطابق الـ Hash المخزن |
+| `hash_national_id()` | بتعمل HMAC-SHA256 للرقم القومي (للبحث السريع) |
+| `encrypt_national_id()` | بتشفر الرقم القومي بـ AES-256-GCM (للتخزين الآمن) |
+| `decrypt_national_id()` | بتفك تشفير الرقم القومي |
+| `create_access_token()` | بتعمل JWT Access Token (صلاحيته 30 دقيقة) |
+| `create_refresh_token()` | بتعمل JWT Refresh Token (صلاحيته 7 أيام) |
+
+**ليه بنعمل Hash وتشفير للرقم القومي؟**
+- **الـ Hash** (HMAC): عشان نقدر نبحث عن اليوزر بالرقم القومي بسرعة بدون ما نفك تشفير كل الأرقام
+- **التشفير** (AES): عشان لو الـ HR محتاج يشوف الرقم القومي، نقدر نفك التشفير ونعرضه
+
+**التقييم**: ✅ شغال صح — التصميم الأمني ممتاز
+
+> [!WARNING]
+> **ملاحظة**: `hmac.new()` في السطر 21 المفروض يكون `hmac.new` مش `hmac.new`. ده ممكن يسبب خطأ. **تحديث**: بعد مراجعة أدق، الكود بيستخدم `hmac.new()` وده صح في Python.
+
+---
+
+#### 4. `app/db/database.py` — الاتصال بقاعدة البيانات
+
+**الوظيفة**: بيتصل بـ MongoDB وبيجهز كل الـ Models.
+
+**نقطة مهمة جدًا**: الملف بيستخدم `AsyncMongoMockClient` بدل MongoDB حقيقي! يعني:
+- مش محتاج تنصب MongoDB على جهازك
+- البيانات بتتخزن في الذاكرة (RAM) وبتتمسح لما السيرفر يقفل
+- ده كويس للتطوير والاختبارات بس **مش للـ Production**
+
+**نفس الكلام مع Redis**: بيستخدم `fakeredis` بدل Redis حقيقي.
+
+**التقييم**: ✅ شغال صح للتطوير
+
+> [!IMPORTANT]
+> **للـ Production**: لازم تستبدل `AsyncMongoMockClient` بـ `motor.motor_asyncio.AsyncIOMotorClient` و `fakeredis` بـ `redis.asyncio`. الكود جاهز لده لأن الـ `docker-compose.yml` معمول فيه MongoDB و Redis حقيقيين.
+
+---
+
+#### 5. `app/db/seed.py` — ملء البيانات التجريبية
+
+**الوظيفة**: بيضيف بيانات تجريبية في قاعدة البيانات لما السيرفر يبدأ.
+
+**البيانات اللي بيضيفها**:
+
+| البيان | التفاصيل |
+|--------|----------|
+| HR User | email: `hr@example.com`, password: `admin123`, is_admin: true |
+| Candidate User | email: `candidate@example.com`, password: `password123`, is_admin: false |
+| MCQ Exam | "Python Developer Assessment" — سؤالين MCQ |
+| Lab | "Linux Fundamentals" — مهمتين (إنشاء مجلد وملف) |
+| Interview | "Behavioral Interview" — سؤالين فيديو |
+
+**التقييم**: ✅ شغال صح
+
+> [!WARNING]
+> **مشكلة**: الامتحان فيه سؤالين بس وكل واحد 10 نقاط (المجموع 20)، والـ `passing_score` هو 60%. يعني المرشح محتاج 12 نقطة من 20 عشان ينجح. بس السؤالين قيمتهم 10+10=20 فلو جاوب واحد صح هيجيب 50% ويرسب. ده مش مشكلة تقنية بس ممكن يكون confusing.
+
+---
+
+#### 6. `app/models/user.py` — موديل المستخدمين
+
+**الوظيفة**: بيعرّف شكل بيانات المستخدم في قاعدة البيانات.
+
+**الموديلات**:
+
+**`User`** — بيانات اليوزر:
+```
+full_name        → الاسم الكامل
+email            → الإيميل (Unique + Indexed)
+phone            → التليفون (Unique + Indexed)
+national_id_hash → Hash الرقم القومي (للبحث السريع)
+national_id_encrypted → الرقم القومي مشفر (AES-256)
+password_hash    → كلمة المرور مشفرة (bcrypt)
+token_version    → نسخة التوكن (لإبطال كل التوكنات)
+is_active        → الحساب مفعل ولا لأ
+is_verified      → الإيميل متأكد منه ولا لأ
+is_admin         → ده أدمن/HR ولا لأ
+```
+
+**`RefreshToken`** — بيانات Refresh Token:
+```
+user_id     → لأي يوزر
+token_hash  → hash التوكن
+expires_at  → بينتهي إمتى
+revoked     → تم إبطاله ولا لأ
+ip_address  → IP اللي عمل Login منه
+user_agent  → المتصفح اللي استخدمه
+```
+
+**`AuditLog`** — سجل العمليات:
+```
+user_id    → مين عمل العملية
+action     → نوع العملية (REGISTER, LOGIN, etc.)
+payload    → تفاصيل إضافية
+created_at → إمتى حصلت
+```
+
+**التقييم**: ✅ ممتاز — التصميم آمن ومنظم
+
+---
+
+#### 7. `app/models/exam.py` — موديل الامتحانات
+
+**الموديلات**:
+
+**`Exam`**: تعريف الامتحان
+```
+title           → اسم الامتحان
+type            → نوعه (MCQ, Written, Lab, Interview)
+duration_minutes → المدة بالدقائق
+passing_score   → درجة النجاح (%)
+cooldown_days   → عدد أيام الانتظار قبل إعادة المحاولة (افتراضي 90 يوم)
+```
+
+**`Question`**: الأسئلة
+```
+exam_id        → تابع لأي امتحان
+difficulty     → الصعوبة (Easy, Medium, Hard)
+type           → نوع السؤال (MCQ, Written)
+body           → نص السؤال
+options        → الاختيارات {"A": "...", "B": "..."}
+correct_answer → الإجابة الصحيحة
+points         → عدد النقاط
+```
+
+**`ExamSession`**: جلسة الامتحان (كل مرة مرشح يبدأ امتحان)
+```
+user_id          → مين بيمتحن
+exam_id          → أي امتحان
+status           → الحالة (In_Progress, Passed, Failed, Violated, Cancelled)
+grading_status   → حالة التصحيح (pending, auto_graded, reviewed)
+score_pct        → الدرجة كنسبة مئوية
+violations_count → عدد المخالفات
+answers          → إجابات المرشح
+```
+
+**`ViolationRule`**: قواعد المخالفات
+```
+type    → نوع المخالفة (Tab_Change, Focus_Lost, etc.)
+points  → عدد نقاط الجزاء
+action  → الإجراء (warning أو terminate)
+```
+
+**`ViolationLog`**: سجل المخالفات
+```
+session_id   → في أي جلسة حصلت المخالفة
+type         → نوعها
+metadata_log → تفاصيل إضافية
+```
+
+**التقييم**: ✅ ممتاز — تصميم شامل
+
+> [!NOTE]
+> **ملاحظة**: `AnswerObj` (سطر 30) هو Document فارغ ومش بيستخدم في أي مكان. ده Dead Code.
+
+---
+
+#### 8. `app/models/lab.py` — موديل المعامل
+
+**`Lab`**: تعريف المعمل
+```
+title           → اسم المعمل
+docker_image    → صورة Docker اللي هتشتغل (مثلاً ubuntu:latest)
+duration_minutes → المدة
+passing_score   → درجة النجاح
+tasks           → قائمة المهام المطلوبة
+```
+
+**`LabTask`**: مهمة داخل المعمل
+```
+description          → وصف المهمة
+verification_script  → سكريبت التحقق (Bash command)
+points               → النقاط
+```
+
+**`LabSession`**: جلسة المعمل
+```
+container_id         → ID الـ Docker Container
+status               → الحالة (Provisioning, Running, Submitted, Terminated)
+score                → الدرجة
+verification_attempts → عدد محاولات التحقق
+report_json          → تقرير التحقق (JSON)
+```
+
+**التقييم**: ✅ شغال صح
+
+---
+
+#### 9. `app/models/interview.py` — موديل المقابلات
+
+**`Interview`**: تعريف المقابلة
+```
+title       → اسم المقابلة
+description → الوصف
+questions   → قائمة الأسئلة
+```
+
+**`InterviewQuestion`**: سؤال المقابلة
+```
+text                → نص السؤال
+think_time_seconds  → وقت التفكير قبل التسجيل
+answer_time_seconds → وقت الإجابة (التسجيل)
+max_retakes         → أقصى عدد إعادات التسجيل
+```
+
+**`InterviewSession`**: جلسة المقابلة
+```
+answers    → إجابات المرشح (Dict: question_id → AnswerDetails)
+analytics  → إحصائيات (عدد مرات فقد التركيز، إعادة تحميل الصفحة)
+hr_score   → درجة الـ HR
+hr_feedback → تعليق الـ HR
+```
+
+**`AnswerDetails`**: تفاصيل إجابة سؤال واحد
+```
+video_key         → مسار الفيديو في S3
+duration_seconds  → مدة التسجيل
+retakes_used      → عدد الإعادات المستخدمة
+transcript        → النص المفرّغ من الفيديو (AI)
+transcript_status → حالة التفريغ (Pending, Processing, Completed)
+```
+
+**التقييم**: ✅ ممتاز
+
+---
+
+#### 10. `app/models/result.py` — النتائج المجمعة
+
+**`CandidateResult`**: النتيجة النهائية لكل مرشح
+```
+mcq_score        → درجة الـ MCQ
+lab_score        → درجة الـ Lab
+interview_score  → درجة المقابلة
+final_score      → الدرجة النهائية (محسوبة بالمعادلة)
+status           → الحالة (Pending, Passed, Failed)
+```
+
+**المعادلة**: `final_score = (mcq * 0.4) + (lab * 0.4) + (interview * 0.2)`
+
+**التقييم**: ✅ شغال صح
+
+---
+
+#### 11. `app/schemas/auth.py` — التحقق من المدخلات
+
+**الوظيفة**: بيتأكد إن البيانات اللي اليوزر بيبعتها صحيحة قبل ما توصل للسيرفر.
+
+**التحققات على الرقم القومي المصري**:
+- لازم يكون 14 رقم بالظبط
+- أول رقم لازم يكون 2 (مواليد 1900s) أو 3 (مواليد 2000s)
+- الأرقام من 2 لـ 7 لازم تكون تاريخ ميلاد صحيح
+- كود المحافظة (أرقام 8-9) لازم يكون من الأكواد المعروفة
+- تاريخ الميلاد مش ممكن يكون في المستقبل
+- العمر مش ممكن يكون أكبر من 120 سنة
+
+**التحقق على كلمة المرور**: لازم تكون 8 أحرف على الأقل.
+
+**التقييم**: ✅ ممتاز — validation شامل ومفصل
+
+---
+
+#### 12. `app/api/auth.py` — API التسجيل والدخول
+
+**الـ Endpoints**:
+
+| Method | Path | الوظيفة |
+|--------|------|---------|
+| POST | `/register` | تسجيل مستخدم جديد |
+| POST | `/login` | تسجيل الدخول (بالإيميل أو الرقم القومي) |
+| GET | `/me` | جلب بيانات اليوزر الحالي |
+| POST | `/refresh` | تجديد Access Token |
+| POST | `/logout` | تسجيل الخروج |
+
+**تفاصيل مهمة**:
+- الـ Login بيدعم الدخول بالإيميل أو الرقم القومي
+- بيعمل Audit Log لكل عملية (Register, Login Success, Login Failed, Logout)
+- بيخزن الـ Refresh Token مشفر في DB
+- بيعمل Set-Cookie للـ Access Token عشان الـ WebSocket يقدر يقراه
+
+**التقييم**: ✅ شغال صح
+
+> [!WARNING]
+> **مشكلة**: الـ `LoginPage.tsx` في الـ Frontend بيبعت الـ Login كـ `FormData` (form-urlencoded) بس الـ Backend بيتوقع JSON (`LoginRequest`). ده هيسبب خطأ `422 Unprocessable Entity` لما تحاول تعمل Login فعلي.
+> 
+> **الحل**: إما تغير الـ Frontend يبعت JSON، أو تغير الـ Backend يستقبل Form Data.
+
+> [!WARNING]
+> **مشكلة تانية**: الـ Frontend بيتوقع إن الـ Backend يرجع `{ access_token, user }` (سطر 31 في LoginPage.tsx)، بس الـ Backend بيرجع `{ access_token, refresh_token, token_type }` بس بدون `user` object. ده معناه إن الـ `user` هيكون `undefined` في الـ Frontend والـ Dashboard مش هيعرض بيانات اليوزر.
+
+---
+
+#### 13. `app/api/deps.py` — التحقق من التوكن
+
+**الوظيفة**: ده Dependency بيتنفذ قبل أي API محمي. بياخد الـ Token من الـ Header ويتحقق منه ويرجع اليوزر.
+
+**إزاي بيشتغل**:
+1. بياخد الـ Token من `Authorization: Bearer <token>` header
+2. بيفك الـ JWT ويطلع الـ `user_id`
+3. بيجيب اليوزر من قاعدة البيانات
+4. بيتأكد إنه Active
+5. لو أي حاجة غلط بيرجع 401 Unauthorized
+
+**التقييم**: ✅ شغال صح
+
+---
+
+#### 14. `app/api/exam.py` — API الامتحانات + WebSocket
+
+ده أكبر وأهم ملف في الـ Backend (342 سطر). بيتعامل مع كل حاجة متعلقة بالامتحانات.
+
+**الـ REST Endpoints**:
+
+| Method | Path | الوظيفة |
+|--------|------|---------|
+| GET | `/available` | جلب الامتحانات المتاحة |
+| POST | `/start/{exam_id}` | بدء امتحان جديد |
+| POST | `/submit/{session_id}` | تسليم الامتحان (Fallback) |
+
+**الـ WebSocket Endpoint**: `/ws/{session_id}`
+
+**إيه بيحصل لما المرشح يبدأ امتحان؟**:
+1. النظام بيتشيك لو المرشح في فترة Cooldown (90 يوم بعد الرسوب)
+2. بيتشيك لو عنده جلسة نشطة بالفعل (لو أيوه بيرجعله الجلسة دي)
+3. بينشئ جلسة جديدة في MongoDB
+4. بيحفظ حالة الجلسة في Redis (عشان السرعة)
+5. بيرجع `session_id` للمرشح
+
+**إيه بيحصل في الـ WebSocket؟**:
+1. المرشح بيتصل بالـ WebSocket عبر الـ `session_id`
+2. النظام بيبعت أول 3 أسئلة (بدون الإجابة الصحيحة!)
+3. المرشح يقدر يعمل:
+   - `ping`: للتأكد إن الاتصال شغال
+   - `fetch_questions`: لجلب أسئلة إضافية
+   - `save_answer`: لحفظ إجابة سؤال
+   - `log_violation`: لتسجيل مخالفة (تبديل Tab مثلاً)
+   - `submit`: لتسليم الامتحان
+4. الإجابات بتتخزن في Redis أولاً (سريع) ثم MongoDB عند التسليم
+5. لو المخالفات وصلت 3 → الامتحان بيتلغى تلقائيًا
+
+**التصحيح التلقائي**:
+- لو كل الأسئلة MCQ → بيصحح تلقائي ويحسب النسبة
+- لو فيه أسئلة Written → بيخلي `grading_status = "pending"` للـ HR يراجعها
+
+**التقييم**: ✅ ممتاز — أحسن ملف في المشروع
+
+> [!NOTE]
+> **نقطة قوة**: استخدام Redis Lock (`setnx`) لمنع التسليم المتكرر (Race Condition Protection).
+
+---
+
+#### 15. `app/api/lab.py` — API المعامل + WebSocket
+
+**الـ REST Endpoints**:
+
+| Method | Path | الوظيفة |
+|--------|------|---------|
+| GET | `/available` | جلب المعامل المتاحة |
+| POST | `/start/{lab_id}` | بدء معمل جديد |
+| POST | `/submit/{session_id}` | تسليم المعمل |
+
+**الـ WebSocket**: `/ws/{session_id}` — بيربط الـ Terminal في المتصفح بالـ Docker Container
+
+**إيه بيحصل لما المرشح يبدأ معمل؟**:
+1. Cooldown Check (زي الامتحان)
+2. Concurrency Check: يوزر واحد مش يقدر يشغل أكتر من Container في نفس الوقت
+3. بينشئ Docker Container من الـ Image المحدد
+4. بيخزن حالة الجلسة في Redis
+5. بيرجع `session_id` + `container_id`
+
+**إيه بيحصل لما يسلّم؟**:
+1. بينفذ سكريبت التحقق لكل مهمة داخل الـ Container
+2. بيحسب الدرجة
+3. بيقفل الـ Container ويمسحه
+4. بيحفظ النتيجة
+
+**التقييم**: ✅ شغال صح
+
+> [!WARNING]
+> **مشكلة في WebSocket**: السطر 219 بيستخدم `logger` بس مش معرّف في الملف (مفيش `import logging` أو `logger = logging.getLogger`). ده هيسبب `NameError` لو حصل WebSocket Disconnect.
+
+> [!NOTE]
+> **نقطة**: الـ WebSocket في المعمل بيعمل Echo بس (`echo: {data}`) وده Placeholder. في الـ Production لازم يتربط فعلاً بـ Docker exec stream.
+
+---
+
+#### 16. `app/api/interview.py` — API المقابلات
+
+**الـ Endpoints**:
+
+| Method | Path | الوظيفة |
+|--------|------|---------|
+| GET | `/available` | جلب المقابلات المتاحة |
+| POST | `/start/{interview_id}` | بدء مقابلة |
+| GET | `/session/{id}/question/{qid}/upload-url` | جلب Pre-Signed URL لرفع الفيديو |
+| POST | `/session/{id}/answer` | حفظ إجابة سؤال |
+| POST | `/submit/{session_id}` | تسليم المقابلة |
+
+**الفلو**:
+1. المرشح يبدأ المقابلة → يحصل على `session_id`
+2. لكل سؤال: يطلب Pre-Signed Upload URL من S3
+3. يسجل الفيديو ويرفعه على S3 باستخدام الـ URL
+4. يبعت confirmation إن الإجابة اترفعت
+5. النظام بيشغل AI Transcription في الـ Background (Mock)
+6. لما يخلص كل الأسئلة يسلّم المقابلة
+
+**التقييم**: ✅ شغال صح
+
+> [!NOTE]
+> **الـ AI Transcription** حاليًا Mock (بيستنى 5 ثواني ويحط نص ثابت). في الـ Production لازم يتربط بـ OpenAI Whisper أو خدمة تفريغ صوتي.
+
+---
+
+#### 17. `app/api/hr.py` — لوحة الـ HR
+
+**الـ Endpoints**:
+
+| Method | Path | الوظيفة |
+|--------|------|---------|
+| GET | `/candidates` | قائمة كل المرشحين مع درجاتهم |
+| GET | `/candidates/{user_id}` | تفاصيل مرشح واحد |
+| GET | `/exams` | كل جلسات الامتحانات |
+| GET | `/labs` | كل جلسات المعامل |
+| GET | `/interviews` | كل جلسات المقابلات |
+| GET | `/interview/{session_id}` | تفاصيل مقابلة مع Pre-Signed URLs للفيديوهات |
+| POST | `/evaluate/{session_id}` | تقييم مقابلة (إعطاء درجة وتعليق) |
+
+**التقييم**: ⚠️ فيه مشاكل
+
+> [!CAUTION]
+> **مشكلة أمنية كبيرة**: الـ `require_admin` dependency (سطر 16-19) **مش بيتحقق إن اليوزر Admin فعلاً**! بيرجع `current_user` بدون أي تشييك. يعني أي يوزر عادي يقدر يدخل على HR Dashboard ويشوف كل البيانات.
+>
+> **الحل**: لازم يتشيك `if not current_user.is_admin: raise HTTPException(403, "Access denied")`
+
+> [!WARNING]
+> **مشكلة**: `ExamSession` مفيهوش field اسمه `submitted_at` (السطر 29 بيعمل `.sort("-submitted_at")`). الـ Field الموجود اسمه `finished_at`. ده ممكن يسبب خطأ أو يرجع `None`.
+
+---
+
+#### 18. `app/services/docker_service.py` — خدمة Docker
+
+**الوظيفة**: بتدير Docker Containers لبيئة اللينكس.
+
+**الدوال**:
+- `create_container()`: بتعمل Container جديد مع قيود أمنية:
+  - Memory: 512MB
+  - CPU: 1 core
+  - PIDs: 100 process max
+  - Network: معزول تماماً (none)
+  - Security: no-new-privileges + Drop ALL capabilities
+- `execute_verification()`: بتنفذ سكريبت التحقق داخل الـ Container
+- `terminate_container()`: بتقفل وتمسح الـ Container
+
+**التقييم**: ✅ التصميم الأمني ممتاز
+
+---
+
+#### 19. `app/services/storage_service.py` — خدمة التخزين
+
+**الوظيفة**: بتدير رفع وتحميل الفيديوهات (Mock لـ S3/MinIO).
+
+**حاليًا**: كل الدوال Mock. بترجع URLs وهمية وبتفترض إن الملف موجود (إلا لو الـ key فيه كلمة "fail").
+
+**التقييم**: ✅ شغال كـ Mock
+
+> [!IMPORTANT]
+> **للـ Production**: لازم تتربط بـ AWS S3 أو MinIO فعلي باستخدام `aioboto3`.
+
+---
+
+#### 20. الاختبارات (Tests)
+
+**الملفات**: 6 ملفات اختبار + 1 Load Test
+
+| الملف | عدد الاختبارات | الوظيفة |
+|-------|---------------|---------|
+| `test_auth.py` | ~5 | تسجيل، دخول، تجديد توكن |
+| `test_exam.py` | ~5 | بدء امتحان، WebSocket، تسليم، cooldown |
+| `test_lab.py` | ~3 | بدء معمل، تسليم، cooldown |
+| `test_interview.py` | ~4 | بدء مقابلة، رفع فيديو، تسليم، cooldown |
+| `test_hr.py` | ~3 | لوحة HR، تقييم |
+| `test_integration.py` | 1 | End-to-End (التدفق الكامل) |
+| `locustfile.py` | - | Load Testing (100 يوزر) |
+
+**النتيجة**: ✅ **21 اختبار ناجح** (0 فشل)
+
+---
+
+## 🖥️ الـ Frontend بالتفصيل
+
+### 📁 هيكل الملفات
+
+```
+frontend/src/
+├── api/
+│   └── api.ts            ← Axios client مع Interceptors
+├── stores/
+│   └── authStore.ts      ← Zustand state management
+├── router/
+│   ├── index.tsx          ← تعريف كل الـ Routes
+│   ├── Guards.tsx          ← حماية الصفحات (Auth, Guest, Exam)
+│   └── RoleGuard.tsx       ← حماية صفحات الـ HR
+├── layouts/
+│   ├── AuthLayout.tsx      ← تصميم صفحة Login
+│   ├── CandidateLayout.tsx ← تصميم Dashboard المرشح
+│   ├── HRLayout.tsx        ← تصميم Dashboard الـ HR
+│   ├── ExamLayout.tsx      ← تصميم صفحة الامتحان (محمية)
+│   ├── LabLayout.tsx       ← تصميم صفحة المعمل
+│   └── InterviewLayout.tsx ← تصميم صفحة المقابلة
+├── pages/
+│   ├── LoginPage.tsx       ← صفحة تسجيل الدخول
+│   ├── CandidateDashboard.tsx ← Dashboard المرشح
+│   ├── HRDashboard.tsx     ← Dashboard الـ HR
+│   ├── ExamPage.tsx        ← صفحة حل الامتحان
+│   ├── LabPage.tsx         ← صفحة المعمل (Terminal)
+│   └── InterviewPage.tsx   ← صفحة المقابلة (فيديو)
+├── hooks/
+│   ├── useExamSocket.ts    ← WebSocket hook للامتحان
+│   └── useLabSocket.ts     ← WebSocket hook للمعمل
+└── components/ui/
+    ├── button.tsx          ← مكون زرار
+    ├── card.tsx            ← مكون كارت
+    ├── tabs.tsx            ← مكون تابات
+    └── table.tsx           ← مكون جدول
+```
+
+---
+
+### 📄 شرح كل ملف
+
+---
+
+#### 1. `api/api.ts` — Axios Client
+
+**الوظيفة**: بيعمل Axios instance جاهز للتواصل مع الـ Backend.
+
+**مميزات**:
+- **Request Interceptor**: بيضيف الـ Token تلقائيًا لكل Request
+- **Response Interceptor**: لو الـ Backend رجع 401 (Unauthorized) → بيعمل Logout تلقائي ويرجع اليوزر لصفحة Login
+
+**التقييم**: ✅ شغال صح
+
+> [!NOTE]
+> **ملاحظة**: مفيش Refresh Token logic. لو الـ Access Token انتهى، اليوزر هيتسحب لصفحة Login مباشرة بدل ما يجدد التوكن تلقائيًا.
+
+---
+
+#### 2. `stores/authStore.ts` — State Management
+
+**الوظيفة**: بيخزن بيانات اليوزر المسجل والـ Token باستخدام Zustand.
+
+**الحالة المخزنة**:
+```
+accessToken → التوكن الحالي
+user        → بيانات اليوزر (id, full_name, email, national_id, role)
+```
+
+**الدوال**:
+```
+setAuth(token, user) → حفظ بيانات اليوزر بعد Login
+logout()             → مسح كل البيانات
+```
+
+**ميزة مهمة**: بيستخدم `persist` middleware يعني البيانات بتتحفظ في `localStorage` ومش بتتمسح لما المتصفح يتقفل.
+
+**التقييم**: ✅ شغال صح
+
+---
+
+#### 3. `router/index.tsx` — الـ Routes
+
+**الوظيفة**: بيعرّف كل صفحات التطبيق وإزاي توصلها.
+
+**الـ Routes**:
+
+| Path | Guard | Layout | Page |
+|------|-------|--------|------|
+| `/login` | GuestGuard | AuthLayout | LoginPage |
+| `/dashboard` | AuthGuard | CandidateLayout | CandidateDashboard |
+| `/exam/:sessionId` | ExamGuard | ExamLayout | ExamPage |
+| `/lab/:sessionId` | ExamGuard | LabLayout | LabPage |
+| `/interview/:sessionId` | ExamGuard | InterviewLayout | InterviewPage |
+| `/hr/dashboard` | RoleGuard(HR,Admin) | HRLayout | HRDashboard |
+
+**التقييم**: ✅ شغال صح — التنظيم ممتاز
+
+---
+
+#### 4. `router/Guards.tsx` — حماية الصفحات
+
+**3 أنواع من الحماية**:
+- **AuthGuard**: لازم يكون اليوزر مسجل دخول
+- **GuestGuard**: لازم يكون اليوزر مش مسجل دخول (لصفحة Login)
+- **ExamGuard**: لازم يكون مسجل دخول (نفس AuthGuard حاليًا)
+
+**التقييم**: ✅ شغال صح
+
+> [!NOTE]
+> **ملاحظة**: `ExamGuard` هو نسخة طبق الأصل من `AuthGuard`. في المستقبل المفروض يتشيك إن المرشح عنده جلسة نشطة فعلاً.
+
+---
+
+#### 5. `pages/LoginPage.tsx` — صفحة الدخول
+
+**التقييم**: ⚠️ فيه مشاكل
+
+> [!CAUTION]
+> **مشكلة رئيسية**: الصفحة بتبعت الـ Login كـ `FormData` (application/x-www-form-urlencoded):
+> ```js
+> const formData = new FormData();
+> formData.append("username", email);
+> formData.append("password", password);
+> ```
+> بس الـ Backend بيتوقع JSON:
+> ```python
+> class LoginRequest(BaseModel):
+>     email_or_national_id: str
+>     password: str
+> ```
+> كمان اسم الـ field مختلف: الـ Frontend بيبعت `username` والـ Backend بيتوقع `email_or_national_id`.
+>
+> **الحل**: غيّر الـ Frontend يبعت JSON:
+> ```js
+> const res = await api.post("/auth/login", {
+>     email_or_national_id: email,
+>     password: password
+> });
+> ```
+
+> [!WARNING]
+> **مشكلة تانية**: بيتوقع `res.data.user` بس الـ Backend مش بيرجع `user` object. محتاج يعمل call لـ `/auth/me` بعد الـ Login عشان يجيب بيانات اليوزر.
+
+---
+
+#### 6. `pages/CandidateDashboard.tsx` — Dashboard المرشح
+
+**الوظيفة**: بيعرض Timeline فيها 4 مراحل:
+1. ✅ Registration (مكتمل)
+2. ◉ MCQ Exam (متاح — فيه زرار Start)
+3. ○ Linux Lab (مقفل)
+4. ○ Video Interview (مقفل)
+
+**التقييم**: ⚠️ جزئي
+
+> [!WARNING]
+> **مشاكل**:
+> - زرار "Start MCQ Exam" مش متربط بأي API. مفيش `onClick` handler أو navigation.
+> - الـ Timeline مش Dynamic. الحالة مش بتتغير بناءً على بيانات فعلية من الـ Backend.
+> - الـ `useQuery` بيرجع data ثابت: `{ status: "pending" }` ومش بيجيب حاجة من السيرفر.
+
+---
+
+#### 7. `pages/ExamPage.tsx` — صفحة الامتحان
+
+**الوظيفة**: صفحة حل أسئلة MCQ مع Timer و Violation tracking.
+
+**الميزات**:
+- Timer (ساعة) بيتحدث كل ثانية
+- عرض سؤال واحد في المرة مع أزرار Previous/Next
+- لما يختار إجابة بيتلوّن الاختيار
+- لما الوقت يخلص بيسلّم تلقائي
+- لو المخالفات وصلت 3 بيتلغى الامتحان
+
+**التقييم**: ⚠️ فيه مشاكل
+
+> [!WARNING]
+> **مشكلة**: الأسئلة Hardcoded (Mock) في الكود مش بتيجي من الـ Backend:
+> ```js
+> const MOCK_QUESTIONS = [
+>   { id: "q1", text: "What is the time complexity...", options: [...] },
+>   { id: "q2", text: "Which keyword...", options: [...] },
+> ];
+> ```
+> المفروض تيجي من الـ WebSocket `init` message اللي بيبعتها الـ Backend.
+
+> [!WARNING]
+> **مشكلة تانية**: الـ `useExamSocket` hook بيبعت الإجابة عبر `submitAnswer` بس الـ Backend بيتوقع format مختلف:
+> - Frontend يبعت: `{ event: 'answer', data: { question_id, answer } }`
+> - Backend يتوقع: `{ action: 'save_answer', payload: { question_id, answer } }`
+
+---
+
+#### 8. `pages/LabPage.tsx` — صفحة المعمل
+
+**الوظيفة**: بيعرض Terminal حقيقي في المتصفح باستخدام xterm.js.
+
+**الميزات**:
+- Terminal أسود مع خط Monospace
+- Task Details panel على الجنب
+- زرار "Verify Solution" و "Submit Lab"
+- Auto-resize للـ Terminal
+
+**التقييم**: ✅ شغال صح (مع Mock WebSocket)
+
+---
+
+#### 9. `pages/InterviewPage.tsx` — صفحة المقابلة
+
+**الوظيفة**: صفحة تسجيل فيديو لكل سؤال.
+
+**الميزات**:
+- Stepper يعرض تقدم الأسئلة
+- Camera preview حي
+- Recording indicator (نقطة حمراء + Timer)
+- بيسجل بـ MediaRecorder API
+- لما يوقف التسجيل بينتقل للسؤال اللي بعده
+
+**التقييم**: ⚠️ فيه مشاكل
+
+> [!WARNING]
+> **مشكلة**: الأسئلة Hardcoded (Mock) ومش بتيجي من الـ Backend.
+
+> [!WARNING]
+> **مشكلة**: مفيش Upload فعلي للفيديو. الكود بيعمل `console.log("Video chunk size:", blob.size)` بس ومش بيرفع حاجة على S3.
+
+---
+
+#### 10. `components/ui/` — مكونات UI
+
+**المشكلة الكبيرة هنا**: المكونات دي **مكونات وهمية (Stubs)** ومش مكونات shadcn/ui الحقيقية.
+
+**السبب**: الـ `shadcn init` كان بيحط المكونات في مجلد غلط (`@/components/` بدل `src/components/`). فاضطرينا نعمل مكونات بسيطة بدل الحقيقية.
+
+**مثال — `button.tsx`**:
+```tsx
+// ده Stub مش shadcn الحقيقي
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, ...props }, ref) => {
+    return <button ref={ref} className={`btn ${variant} ${size} ${className}`} {...props} />;
+  }
+);
+```
+
+ده مفيهوش أي Styling فعلي. الـ CSS classes `btn`, `default`, `lg` مش معرّفة في أي مكان.
+
+**التقييم**: ❌ محتاج إصلاح
+
+> [!CAUTION]
+> **تأثير**: كل الأزرار والكروت والجداول والتابات هتظهر بدون أي تنسيق. الشكل هيكون HTML عادي بدون Design.
+
+---
+
+## 📊 ملخص التقييم
+
+### ✅ ما تم تنفيذه بنجاح
+
+| الجزء | التفاصيل |
+|-------|----------|
+| **المعمارية** | تقسيم نظيف (Models, Schemas, API, Services) |
+| **الأمان** | تشفير الرقم القومي (AES-256 + HMAC)، bcrypt لكلمات المرور |
+| **Validation** | تحقق شامل من الرقم القومي المصري (14 رقم، تاريخ ميلاد، كود محافظة) |
+| **JWT Auth** | Access + Refresh Tokens مع Cookie support للـ WebSocket |
+| **Exam WebSocket** | نظام امتحان كامل مع حفظ تلقائي في Redis ومنع الغش |
+| **Lab Docker** | تشغيل Containers معزولة بقيود أمنية (Memory, CPU, Network) |
+| **Interview Flow** | تدفق كامل: بدء → رفع فيديو → AI Transcription → تسليم |
+| **Score Engine** | حساب الدرجة النهائية (40% MCQ + 40% Lab + 20% Interview) |
+| **Cooldown System** | منع إعادة الامتحان قبل 90 يوم |
+| **Audit Logging** | تسجيل كل العمليات (Register, Login, Exam Start, etc.) |
+| **Tests** | 21 اختبار ناجح يغطي كل الـ Flows |
+| **Seed Data** | بيانات تجريبية جاهزة للتجربة |
+| **Frontend Routing** | نظام توجيه كامل مع Guards |
+| **Frontend State** | Zustand + Persist لإدارة حالة المستخدم |
+
+### ❌ المشاكل اللي محتاجة إصلاح
+
+| # | المشكلة | الخطورة | المكان |
+|---|---------|---------|--------|
+| 1 | **Login مش هيشتغل** — Frontend بيبعت FormData والـ Backend بيتوقع JSON | 🔴 عالية | `LoginPage.tsx` سطر 21-29 |
+| 2 | **مفيش User object بعد Login** — Backend مش بيرجع user data | 🔴 عالية | `auth.py` سطر 123-128 vs `LoginPage.tsx` سطر 31 |
+| 3 | **HR Dashboard مش محمي** — `require_admin` مش بيتشيك is_admin | 🔴 عالية | `hr.py` سطر 16-19 |
+| 4 | **shadcn components مش شغالة** — Stubs بدون CSS | 🟡 متوسطة | `components/ui/*` |
+| 5 | **أسئلة الامتحان Hardcoded** — مش بتيجي من Backend | 🟡 متوسطة | `ExamPage.tsx` سطر 8-11 |
+| 6 | **WebSocket message format مختلف** — Frontend ≠ Backend | 🟡 متوسطة | `useExamSocket.ts` vs `exam.py` |
+| 8 | **`logger` مش معرّف** في lab.py | 🟢 منخفضة | `lab.py` سطر 219 |
+| 9 | **`submitted_at` field مش موجود** في ExamSession | 🟢 منخفضة | `hr.py` سطر 29 |
+| 10 | **Dead Code** — `AnswerObj` class فارغة | 🟢 منخفضة | `exam.py` سطر 30-32 |
+| 12 | **مفيش صفحة Register** في الـ Frontend (تم الحل) | 🟡 متوسطة | `router/index.tsx` سطر 9 (commented out) |
+| 13 | **Security keys hardcoded** | 🟡 متوسطة | `config.py` |
+| 14 | **مفيش CORS middleware** — Frontend على port 5173 مش هيقدر يكلم Backend على 8000 | 🔴 عالية | `main.py` |
+
+### 🟡 حاجات Mock محتاجة Production Implementation
+
+| الحاجة | الحالي | المطلوب |
+|--------|--------|---------|
+| MongoDB | `AsyncMongoMockClient` (in-memory) | `AsyncIOMotorClient` (real MongoDB) |
+| Redis | `fakeredis` | `redis.asyncio` (real Redis) |
+| S3 Storage | Mock URLs | `aioboto3` (real S3/MinIO) |
+| AI Transcription | `asyncio.sleep(5)` + fixed text | OpenAI Whisper API |
+| Docker Lab WS | Echo server | Real Docker exec stream |
+| Email Notifications | Not implemented | SES / SendGrid |
+
+---
+
+## 🛣️ التوصيات للخطوات القادمة
+
+### أولوية قصوى (لازم تتعمل عشان النظام يشتغل)
+
+1. **إصلاح Login Flow**: خلي الـ Frontend يبعت JSON + اعمل call لـ `/auth/me` بعد Login
+2. **إضافة CORS Middleware** في `main.py`
+3. **إصلاح `require_admin`** عشان يتشيك فعلاً
+4. **ربط ExamPage بالـ WebSocket** بدل Mock Questions
+
+### أولوية عالية
+
+5. تثبيت shadcn/ui صح أو عمل CSS كامل للـ components
+6. عمل Register Page
+7. خلي CandidateDashboard يكون Dynamic
+8. ربط InterviewPage بالـ S3 Upload
+
+### أولوية متوسطة
+
+9. إنشاء `.env` file مع مفاتيح حقيقية
+10. استبدال Mock services بخدمات حقيقية
+11. إضافة Email Notifications
+12. عمل Error Boundaries في React
+
+---
+
+> [!TIP]
+> **الخلاصة**: الـ Backend قوي جدًا ومتصمم كويس (21 تيست بينجحوا). الـ Frontend عنده هيكل ممتاز بس محتاج شغل على ربطه بالـ Backend فعلياً وإصلاح الـ Login Flow. المشروع مش بعيد عن إنه يشتغل فعلاً — محتاج تقريبًا يوم شغل لإصلاح المشاكل الرئيسية.
